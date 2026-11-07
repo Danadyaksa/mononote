@@ -1,7 +1,7 @@
-# Desain Aplikasi Desktop: Aksa Notes
+# Desain Aplikasi Desktop: Mononote
 
 **Tanggal:** 2026-11-07  
-**Lokasi Projek:** `D:\Projek Aksa\aksa-notes`  
+**Lokasi Projek:** `D:\Projek Aksa\mononote`  
 **Stack Utama:** Tauri v2 (Rust) + React 19 + TypeScript + TipTap
 
 ---
@@ -49,7 +49,7 @@ Membangun aplikasi *notepad* desktop personal untuk Windows yang ringan, cepat, 
 Sistem dibagi menjadi unit-unit kecil dengan batas tanggung jawab yang jelas:
 
 ```
-D:\Projek Aksa\aksa-notes\
+D:\Projek Aksa\mononote\
 ├── src-tauri/                  # Backend Native Rust (Tauri v2)
 │   └── src/
 │       ├── models.rs           # Tipe data Note & NoteSummary (Serialize/Deserialize)
@@ -69,7 +69,7 @@ D:\Projek Aksa\aksa-notes\
 ```
 
 ### 3.1 Model Data & Penyimpanan (`models.rs` & `storage.rs`)
-- Setiap catatan disimpan sebagai satu file mandiri `<uuid>.json` di dalam folder data aplikasi lokal (`AppData/Roaming/com.aksa.notes/notes/`).
+- Setiap catatan disimpan sebagai satu file mandiri `<uuid>.json` di dalam folder data aplikasi lokal (`AppData/Roaming/com.mononote.desktop/notes/`).
 - Struktur `Note`:
   - `id: String` (UUID v4)
   - `title: String` (diekstrak otomatis dari baris pertama teks; fallback `"Catatan Baru"`)
