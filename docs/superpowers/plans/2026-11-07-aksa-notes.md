@@ -1,0 +1,3121 @@
+# Aksa Notes Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build Aksa Notes, a lightweight, sleek iPhone-Notes-inspired Windows desktop notepad using Tauri v2 (Rust), React, TypeScript, and TipTap with Warm Light / Sleek Dark themes and Always-on-Top Focus Mode.
+
+**Architecture:** A Tauri v2 desktop app where a small Rust backend (`models`, `storage`, `commands`) stores each note as an atomic local JSON file in `AppData`, handles fast case-insensitive search/sorting, and controls native window Always-on-Top behavior. A minimal React + TipTap frontend renders a custom frameless titlebar, collapsible note list sidebar (Pinned + Recent), and a structured rich-text editor where line 1 is always the note title followed by body text, bullets, and interactive checklists.
+
+**Tech Stack:** Rust (stable MSVC), Tauri v2, React 19, TypeScript 5, Vite 6, TipTap v2 (`@tiptap/react`, `@tiptap/starter-kit`, `@tiptap/extension-document`, `@tiptap/extension-task-list`, `@tiptap/extension-task-item`, `@tiptap/extension-placeholder`), Lucide React icons, Vitest + React Testing Library.
+
+**Spec:** `D:\Projek Aksa\aksa-notes\docs\superpowers\specs\2026-11-07-aksa-notes-design.md`
+
+## Global Constraints
+
+- Project location: `D:\Projek Aksa\aksa-notes`
+- First line of every note acts automatically as the Note Title (`24px`, `font-weight: 700`, `line-height: 1.25`, `letter-spacing: -0.02em`); body copy uses `16px`, `line-height: 1.65`, max reading width `65ch`.
+- Supported rich-text formatting is strictly limited to: Heading 1 (automatic first block), Paragraph, Bold (`Ctrl+B`), Italic (`Ctrl+I`), Bullet List, and Checklist (`TaskList`/`TaskItem`). No bloat features (no folders, tags, slash menus, tables, or code blocks).
+- Auto-save debounce: `300ms` after typing stops, plus immediate flush before switching notes or closing the window.
+- Warm Light palette: Editor `#FAF9F6`, Sidebar `#F2F0EB`, Primary text `#1C1C1E`, Secondary text `#6E6D68`, Accent `#D99B26`, Border `rgba(28, 28, 30, 0.08)`.
+- Sleek Dark palette: Editor `#18181A`, Sidebar `#121214`, Primary text `#F2F2F7`, Secondary text `#8E8E93`, Accent `#E5A93B`, Border `rgba(255, 255, 255, 0.07)`.
+- Enabling Pin to Screen (`Always-on-Top`) locks the window above other apps via Tauri and auto-collapses the sidebar into single-note Focus Mode (while keeping manual sidebar toggle available via button or `Ctrl+\`).
+- Local storage uses atomic writes (`<id>.json.tmp` -> `sync_all()` -> `fs::rename` to `<id>.json`), skips corrupt JSON files without crashing, and creates a single welcome note only on first-ever initialization.
+
+---
+
+## File Structure
+
+```
+D:\Projek Aksa\aksa-notes\
+├── index.html
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+├── src/
+│   ├── main.tsx
+│   ├── App.tsx
+│   ├── App.test.tsx
+│   ├── test-setup.ts
+│   ├── types/
+│   │   └── note.ts
+│   ├── api/
+│   │   ├── notes.ts
+│   │   └── notes.test.ts
+│   ├── components/
+│   │   ├── Titlebar.tsx
+│   │   ├── Sidebar.tsx
+│   │   ├── Sidebar.test.tsx
+│   │   ├── NoteEditor.tsx
+│   │   └── NoteEditor.test.tsx
+│   └── styles/
+│       └── theme.css
+└── src-tauri/
+    ├── Cargo.toml
+    ├── build.rs
+    ├── tauri.conf.json
+    ├── capabilities/
+    │   └── default.json
+    ├── icons/                  # Generated via @tauri-apps/cli icon
+    └── src/
+        ├── main.rs
+        ├── lib.rs
+        ├── models.rs
+        ├── storage.rs
+        └── commands.rs
+```
+
+---
+
+### Task 1: Toolchain Setup, Project Scaffold & Atomic Rust Storage Engine
+
+**Files:**
+- Create: `D:\Projek Aksa\aksa-notes\.gitignore`
+- Create: `D:\Projek Aksa\aksa-notes\package.json`
+- Create: `D:\Projek Aksa\aksa-notes\tsconfig.json`
+- Create: `D:\Projek Aksa\aksa-notes\vite.config.ts`
+- Create: `D:\Projek Aksa\aksa-notes\index.html`
+- Create: `D:\Projek Aksa\aksa-notes\app-icon.svg`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\Cargo.toml`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\build.rs`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\tauri.conf.json`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\capabilities\default.json`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\src\models.rs`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\src\storage.rs`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\src\lib.rs`
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\src\main.rs`
+
+**Interfaces:**
+- Consumes: None (foundational layer).
+- Produces:
+  - Rust structs in `crate::models`:
+    - `Note { id: String, title: String, preview: String, content_json: String, plain_text: String, pinned: bool, created_at: i64, updated_at: i64 }` (`#[serde(rename_all = "camelCase")]`)
+    - `NoteSummary { id: String, title: String, preview: String, pinned: bool, updated_at: i64 }` (`#[serde(rename_all = "camelCase")]`)
+  - Rust `NoteStore` in `crate::storage`:
+    - `NoteStore::new(base_dir: PathBuf) -> Self`
+    - `ensure_initialized(&self) -> Result<(), String>`
+    - `extract_title_and_preview(plain_text: &str) -> (String, String)`
+    - `list_notes(&self, query: Option<&str>) -> Result<Vec<NoteSummary>, String>`
+    - `get_note(&self, id: &str) -> Result<Note, String>`
+    - `create_note(&self) -> Result<Note, String>`
+    - `save_note(&self, id: &str, content_json: String, plain_text: String) -> Result<NoteSummary, String>`
+    - `toggle_pin_note(&self, id: &str) -> Result<NoteSummary, String>`
+    - `delete_note(&self, id: &str) -> Result<(), String>`
+
+- [ ] **Step 1: Ensure Rust toolchain is installed and available on PATH**
+
+Run in PowerShell:
+```powershell
+if (-not (Test-Path "$env:USERPROFILE\.cargo\bin\cargo.exe")) {
+  winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements
+}
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+rustup default stable-x86_64-pc-windows-msvc
+rustc --version
+cargo --version
+```
+Expected: `rustc` and `cargo` print version numbers (`1.8x+`).
+
+- [ ] **Step 2: Create project configuration, frontend package manifest, and Tauri v2 skeleton**
+
+Create `D:\Projek Aksa\aksa-notes\.gitignore`:
+```gitignore
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
+```
+
+Create `D:\Projek Aksa\aksa-notes\package.json`:
+```json
+{
+  "name": "aksa-notes",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.2.0",
+    "@tiptap/extension-document": "^2.11.5",
+    "@tiptap/extension-placeholder": "^2.11.5",
+    "@tiptap/extension-task-item": "^2.11.5",
+    "@tiptap/extension-task-list": "^2.11.5",
+    "@tiptap/pm": "^2.11.5",
+    "@tiptap/react": "^2.11.5",
+    "@tiptap/starter-kit": "^2.11.5",
+    "lucide-react": "^0.475.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.2.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.2.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^26.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vitest": "^3.0.5"
+  }
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\tsconfig.json`:
+```json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["vitest/globals", "@testing-library/jest-dom"]
+  },
+  "include": ["src"]
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\vite.config.ts`:
+```ts
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+const host = process.env.TAURI_DEV_HOST;
+
+export default defineConfig({
+  plugins: [react()],
+  clearScreen: false,
+  server: {
+    port: 1420,
+    strictPort: true,
+    host: host || false,
+    hmr: host
+      ? {
+          protocol: 'ws',
+          host,
+          port: 1421,
+        }
+      : undefined,
+    watch: {
+      ignored: ['**/src-tauri/**'],
+    },
+  },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test-setup.ts'],
+  },
+});
+```
+
+Create `D:\Projek Aksa\aksa-notes\index.html`:
+```html
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aksa Notes</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+Create `D:\Projek Aksa\aksa-notes\app-icon.svg` (clean warm-gold & paper icon for generating Tauri icons):
+```svg
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect x="32" y="32" width="448" height="448" rx="108" fill="#FAF9F6"/>
+  <path d="M32 140C32 80.353 80.353 32 140 32H372C431.647 32 480 80.353 480 140V156H32V140Z" fill="#D99B26"/>
+  <rect x="116" y="226" width="280" height="22" rx="11" fill="#1C1C1E" opacity="0.82"/>
+  <rect x="116" y="290" width="240" height="18" rx="9" fill="#6E6D68" opacity="0.55"/>
+  <rect x="116" y="346" width="196" height="18" rx="9" fill="#6E6D68" opacity="0.4"/>
+</svg>
+```
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\Cargo.toml`:
+```toml
+[package]
+name = "aksa-notes"
+version = "0.1.0"
+description = "Sleek minimal personal notepad"
+authors = ["Aksa"]
+edition = "2021"
+
+[lib]
+name = "aksa_notes_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+```
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\build.rs`:
+```rust
+fn main() {
+    tauri_build::build()
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\tauri.conf.json`:
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aksa Notes",
+  "version": "0.1.0",
+  "identifier": "com.aksa.notes",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Aksa Notes",
+        "width": 980,
+        "height": 680,
+        "minWidth": 360,
+        "minHeight": 420,
+        "decorations": false,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\capabilities\default.json`:
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capabilities for Aksa Notes main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-always-on-top"
+  ]
+}
+```
+
+- [ ] **Step 3: Install npm dependencies and generate Tauri icons**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm install
+npx tauri icon app-icon.svg
+```
+Expected: `node_modules` installed and `src-tauri/icons/icon.ico` + PNG icons created cleanly.
+
+- [ ] **Step 4: Write failing Rust unit tests for `models.rs` and `storage.rs`**
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\src\models.rs`:
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Note {
+    pub id: String,
+    pub title: String,
+    pub preview: String,
+    pub content_json: String,
+    pub plain_text: String,
+    pub pinned: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteSummary {
+    pub id: String,
+    pub title: String,
+    pub preview: String,
+    pub pinned: bool,
+    pub updated_at: i64,
+}
+
+impl From<&Note> for NoteSummary {
+    fn from(note: &Note) -> Self {
+        Self {
+            id: note.id.clone(),
+            title: note.title.clone(),
+            preview: note.preview.clone(),
+            pinned: note.pinned,
+            updated_at: note.updated_at,
+        }
+    }
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\src\storage.rs` with stubbed methods and the full test suite:
+```rust
+use crate::models::{Note, NoteSummary};
+use std::path::PathBuf;
+
+pub struct NoteStore {
+    base_dir: PathBuf,
+}
+
+impl NoteStore {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    pub fn ensure_initialized(&self) -> Result<(), String> {
+        Err("not implemented".into())
+    }
+
+    pub fn extract_title_and_preview(_plain_text: &str) -> (String, String) {
+        ("".into(), "".into())
+    }
+
+    pub fn list_notes(&self, _query: Option<&str>) -> Result<Vec<NoteSummary>, String> {
+        Err("not implemented".into())
+    }
+
+    pub fn get_note(&self, _id: &str) -> Result<Note, String> {
+        Err("not implemented".into())
+    }
+
+    pub fn create_note(&self) -> Result<Note, String> {
+        Err("not implemented".into())
+    }
+
+    pub fn save_note(
+        &self,
+        _id: &str,
+        _content_json: String,
+        _plain_text: String,
+    ) -> Result<NoteSummary, String> {
+        Err("not implemented".into())
+    }
+
+    pub fn toggle_pin_note(&self, _id: &str) -> Result<NoteSummary, String> {
+        Err("not implemented".into())
+    }
+
+    pub fn delete_note(&self, _id: &str) -> Result<(), String> {
+        Err("not implemented".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    #[test]
+    fn extracts_title_and_preview_accurately() {
+        assert_eq!(
+            NoteStore::extract_title_and_preview("   \n  "),
+            ("Catatan Baru".to_string(), "Belum ada teks tambahan".to_string())
+        );
+
+        assert_eq!(
+            NoteStore::extract_title_and_preview("Daftar Belanja\n\nSusu oat\nKopi arabika"),
+            ("Daftar Belanja".to_string(), "Susu oat".to_string())
+        );
+
+        let long_second_line = format!("Judul\n{}", "a".repeat(120));
+        let (title, preview) = NoteStore::extract_title_and_preview(&long_second_line);
+        assert_eq!(title, "Judul");
+        assert_eq!(preview.chars().count(), 91); // 90 chars + ellipsis
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn initializes_welcome_note_only_once() {
+        let dir = tempdir().unwrap();
+        let store = NoteStore::new(dir.path().to_path_buf());
+
+        store.ensure_initialized().unwrap();
+        let initial = store.list_notes(None).unwrap();
+        assert_eq!(initial.len(), 1);
+
+        store.delete_note(&initial[0].id).unwrap();
+        assert!(store.list_notes(None).unwrap().is_empty());
+
+        // Re-running ensure_initialized after user deletes all notes must NOT recreate welcome note
+        store.ensure_initialized().unwrap();
+        assert!(store.list_notes(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn crud_sorting_search_and_corrupt_file_resilience() {
+        let dir = tempdir().unwrap();
+        let store = NoteStore::new(dir.path().to_path_buf());
+
+        let first = store.create_note().unwrap();
+        store
+            .save_note(
+                &first.id,
+                r#"{"type":"doc"}"#.into(),
+                "Ide Projek Rust\nBikin aplikasi catatan minimalis".into(),
+            )
+            .unwrap();
+
+        thread::sleep(Duration::from_millis(5));
+
+        let second = store.create_note().unwrap();
+        store
+            .save_note(
+                &second.id,
+                r#"{"type":"doc"}"#.into(),
+                "Resep Kopi\n18 gram biji kopi".into(),
+            )
+            .unwrap();
+
+        // Most recently updated first when neither is pinned
+        let list = store.list_notes(None).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, second.id);
+        assert_eq!(list[1].id, first.id);
+
+        // Pinning first note moves it to top without changing its updated_at
+        let before_pin = store.get_note(&first.id).unwrap().updated_at;
+        let pinned_summary = store.toggle_pin_note(&first.id).unwrap();
+        assert!(pinned_summary.pinned);
+        assert_eq!(pinned_summary.updated_at, before_pin);
+
+        let list_after_pin = store.list_notes(None).unwrap();
+        assert_eq!(list_after_pin[0].id, first.id);
+        assert_eq!(list_after_pin[1].id, second.id);
+
+        // Case-insensitive search matches body plain_text as well as title
+        let search_body = store.list_notes(Some("MINIMALIS")).unwrap();
+        assert_eq!(search_body.len(), 1);
+        assert_eq!(search_body[0].id, first.id);
+
+        // Corrupt JSON file in notes/ is skipped cleanly
+        fs::write(dir.path().join("notes").join("broken.json"), "{not-valid-json").unwrap();
+        let list_with_corrupt = store.list_notes(None).unwrap();
+        assert_eq!(list_with_corrupt.len(), 2);
+    }
+}
+```
+
+Create minimal `D:\Projek Aksa\aksa-notes\src-tauri\src\lib.rs` and `main.rs` so `cargo test` compiles:
+```rust
+pub mod models;
+pub mod storage;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+`D:\Projek Aksa\aksa-notes\src-tauri\src\main.rs`:
+```rust
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+fn main() {
+    aksa_notes_lib::run()
+}
+```
+
+- [ ] **Step 5: Run `cargo test` to verify tests fail**
+
+Run in PowerShell:
+```powershell
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+Set-Location "D:\Projek Aksa\aksa-notes\src-tauri"
+cargo test
+```
+Expected: FAIL on all 3 storage tests (`extracts_title_and_preview_accurately`, `initializes_welcome_note_only_once`, `crud_sorting_search_and_corrupt_file_resilience`).
+
+- [ ] **Step 6: Implement atomic file storage in `src-tauri/src/storage.rs`**
+
+Replace the `impl NoteStore` block in `D:\Projek Aksa\aksa-notes\src-tauri\src\storage.rs` (keeping the `#[cfg(test)] mod tests` unchanged):
+```rust
+use crate::models::{Note, NoteSummary};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
+
+const DEFAULT_TITLE: &str = "Catatan Baru";
+const DEFAULT_PREVIEW: &str = "Belum ada teks tambahan";
+const EMPTY_DOC_JSON: &str =
+    r#"{"type":"doc","content":[{"type":"heading","attrs":{"level":1}},{"type":"paragraph"}]}"#;
+const WELCOME_DOC_JSON: &str = r#"{"type":"doc","content":[{"type":"heading","attrs":{"level":1},"content":[{"type":"text","text":"Selamat Datang di Aksa Notes"}]},{"type":"paragraph","content":[{"type":"text","text":"Tempat coret-coret cepat yang bersih dan ringan di mata."}]},{"type":"taskList","content":[{"type":"taskItem","attrs":{"checked":true},"content":[{"type":"paragraph","content":[{"type":"text","text":"Baris pertama otomatis jadi judul catatan"}]}]},{"type":"taskItem","attrs":{"checked":false},"content":[{"type":"paragraph","content":[{"type":"text","text":"Klik ikon Pin di kanan atas buat tempel jendela di layar"}]}]},{"type":"taskItem","attrs":{"checked":false},"content":[{"type":"paragraph","content":[{"type":"text","text":"Tekan Ctrl+N kapan saja untuk catatan baru"}]}]}]}]}"#;
+const WELCOME_PLAIN_TEXT: &str = "Selamat Datang di Aksa Notes\nTempat coret-coret cepat yang bersih dan ringan di mata.\nBaris pertama otomatis jadi judul catatan\nKlik ikon Pin di kanan atas buat tempel jendela di layar\nTekan Ctrl+N kapan saja untuk catatan baru";
+
+pub struct NoteStore {
+    base_dir: PathBuf,
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn validate_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("ID catatan tidak valid".into());
+    }
+    Ok(())
+}
+
+impl NoteStore {
+    pub fn new(base_dir: PathBuf) -> Self {
+        Self { base_dir }
+    }
+
+    fn notes_dir(&self) -> PathBuf {
+        self.base_dir.join("notes")
+    }
+
+    fn init_marker_path(&self) -> PathBuf {
+        self.base_dir.join(".initialized")
+    }
+
+    fn note_path(&self, id: &str) -> Result<PathBuf, String> {
+        validate_id(id)?;
+        Ok(self.notes_dir().join(format!("{id}.json")))
+    }
+
+    fn ensure_notes_dir(&self) -> Result<PathBuf, String> {
+        let dir = self.notes_dir();
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Gagal membuat folder penyimpanan catatan: {e}"))?;
+        Ok(dir)
+    }
+
+    fn write_note_atomic(&self, note: &Note) -> Result<(), String> {
+        self.ensure_notes_dir()?;
+        let final_path = self.note_path(&note.id)?;
+        let tmp_path = self.notes_dir().join(format!("{}.json.tmp", note.id));
+
+        let payload = serde_json::to_vec_pretty(note)
+            .map_err(|e| format!("Gagal menyusun data catatan: {e}"))?;
+
+        {
+            let mut file = File::create(&tmp_path)
+                .map_err(|e| format!("Gagal menulis file sementara catatan: {e}"))?;
+            file.write_all(&payload)
+                .map_err(|e| format!("Gagal menyimpan isi catatan: {e}"))?;
+            file.sync_all()
+                .map_err(|e| format!("Gagal menyinkronkan catatan ke disk: {e}"))?;
+        }
+
+        fs::rename(&tmp_path, &final_path)
+            .map_err(|e| format!("Gagal memfinalisasi penyimpanan catatan: {e}"))?;
+        Ok(())
+    }
+
+    pub fn ensure_initialized(&self) -> Result<(), String> {
+        let notes_dir = self.ensure_notes_dir()?;
+        let marker = self.init_marker_path();
+        if marker.exists() {
+            return Ok(());
+        }
+
+        let has_existing_notes = fs::read_dir(&notes_dir)
+            .map_err(|e| format!("Gagal membaca folder catatan: {e}"))?
+            .flatten()
+            .any(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.eq_ignore_ascii_case("json"))
+                    .unwrap_or(false)
+            });
+
+        if !has_existing_notes {
+            let now = now_millis();
+            let (title, preview) = Self::extract_title_and_preview(WELCOME_PLAIN_TEXT);
+            let welcome = Note {
+                id: Uuid::new_v4().to_string(),
+                title,
+                preview,
+                content_json: WELCOME_DOC_JSON.to_string(),
+                plain_text: WELCOME_PLAIN_TEXT.to_string(),
+                pinned: false,
+                created_at: now,
+                updated_at: now,
+            };
+            self.write_note_atomic(&welcome)?;
+        }
+
+        fs::write(&marker, b"1")
+            .map_err(|e| format!("Gagal menulis penanda inisialisasi: {e}"))?;
+        Ok(())
+    }
+
+    pub fn extract_title_and_preview(plain_text: &str) -> (String, String) {
+        let mut non_empty = plain_text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty());
+
+        let title = match non_empty.next() {
+            Some(first) => {
+                let chars: Vec<char> = first.chars().collect();
+                if chars.len() > 120 {
+                    format!("{}…", chars[..120].iter().collect::<String>())
+                } else {
+                    first.to_string()
+                }
+            }
+            None => DEFAULT_TITLE.to_string(),
+        };
+
+        let preview = match non_empty.next() {
+            Some(second) => {
+                let chars: Vec<char> = second.chars().collect();
+                if chars.len() > 90 {
+                    format!("{}…", chars[..90].iter().collect::<String>())
+                } else {
+                    second.to_string()
+                }
+            }
+            None => DEFAULT_PREVIEW.to_string(),
+        };
+
+        (title, preview)
+    }
+
+    pub fn list_notes(&self, query: Option<&str>) -> Result<Vec<NoteSummary>, String> {
+        let dir = self.ensure_notes_dir()?;
+        let normalized_query = query
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(str::to_lowercase);
+
+        let entries =
+            fs::read_dir(&dir).map_err(|e| format!("Gagal membaca daftar catatan: {e}"))?;
+
+        let mut summaries = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_json = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.eq_ignore_ascii_case("json"))
+                .unwrap_or(false);
+            if !is_json {
+                continue;
+            }
+
+            let raw = match fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(err) => {
+                    eprintln!("Melewati file catatan yang tidak terbaca {:?}: {err}", path);
+                    continue;
+                }
+            };
+
+            let note: Note = match serde_json::from_str(&raw) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    eprintln!("Melewati file catatan rusak {:?}: {err}", path);
+                    continue;
+                }
+            };
+
+            if let Some(ref q) = normalized_query {
+                let matches_title = note.title.to_lowercase().contains(q);
+                let matches_body = note.plain_text.to_lowercase().contains(q);
+                if !matches_title && !matches_body {
+                    continue;
+                }
+            }
+
+            summaries.push(NoteSummary::from(&note));
+        }
+
+        summaries.sort_by(|a, b| {
+            b.pinned
+                .cmp(&a.pinned)
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+
+        Ok(summaries)
+    }
+
+    pub fn get_note(&self, id: &str) -> Result<Note, String> {
+        let path = self.note_path(id)?;
+        let raw = fs::read_to_string(&path)
+            .map_err(|e| format!("Catatan tidak ditemukan ({id}): {e}"))?;
+        serde_json::from_str(&raw).map_err(|e| format!("Data catatan rusak ({id}): {e}"))
+    }
+
+    pub fn create_note(&self) -> Result<Note, String> {
+        let now = now_millis();
+        let note = Note {
+            id: Uuid::new_v4().to_string(),
+            title: DEFAULT_TITLE.to_string(),
+            preview: DEFAULT_PREVIEW.to_string(),
+            content_json: EMPTY_DOC_JSON.to_string(),
+            plain_text: String::new(),
+            pinned: false,
+            created_at: now,
+            updated_at: now,
+        };
+        self.write_note_atomic(&note)?;
+        Ok(note)
+    }
+
+    pub fn save_note(
+        &self,
+        id: &str,
+        content_json: String,
+        plain_text: String,
+    ) -> Result<NoteSummary, String> {
+        let mut note = self.get_note(id)?;
+        let (title, preview) = Self::extract_title_and_preview(&plain_text);
+        note.title = title;
+        note.preview = preview;
+        note.content_json = content_json;
+        note.plain_text = plain_text;
+        note.updated_at = now_millis();
+        self.write_note_atomic(&note)?;
+        Ok(NoteSummary::from(&note))
+    }
+
+    pub fn toggle_pin_note(&self, id: &str) -> Result<NoteSummary, String> {
+        let mut note = self.get_note(id)?;
+        note.pinned = !note.pinned;
+        self.write_note_atomic(&note)?;
+        Ok(NoteSummary::from(&note))
+    }
+
+    pub fn delete_note(&self, id: &str) -> Result<(), String> {
+        let path = self.note_path(id)?;
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| format!("Gagal menghapus catatan: {e}"))?;
+        }
+        Ok(())
+    }
+}
+```
+
+- [ ] **Step 7: Run `cargo test` to verify all Rust storage tests pass**
+
+Run in PowerShell:
+```powershell
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+Set-Location "D:\Projek Aksa\aksa-notes\src-tauri"
+cargo test
+```
+Expected: `test result: ok. 3 passed; 0 failed`
+
+- [ ] **Step 8: Commit Task 1**
+
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+git add .gitignore package.json package-lock.json tsconfig.json vite.config.ts index.html app-icon.svg src-tauri/
+git commit -m "feat(storage): scaffold Tauri v2 project and atomic local note store"
+```
+
+---
+
+### Task 2: Tauri IPC Commands & Frontend Notes API Layer
+
+**Files:**
+- Create: `D:\Projek Aksa\aksa-notes\src-tauri\src\commands.rs`
+- Modify: `D:\Projek Aksa\aksa-notes\src-tauri\src\lib.rs`
+- Create: `D:\Projek Aksa\aksa-notes\src\test-setup.ts`
+- Create: `D:\Projek Aksa\aksa-notes\src\types\note.ts`
+- Create: `D:\Projek Aksa\aksa-notes\src\api\notes.ts`
+- Create: `D:\Projek Aksa\aksa-notes\src\api\notes.test.ts`
+
+**Interfaces:**
+- Consumes: `crate::models::{Note, NoteSummary}` and `crate::storage::NoteStore` from Task 1.
+- Produces:
+  - Tauri IPC commands registered in `lib.rs`: `list_notes`, `get_note`, `create_note`, `save_note`, `toggle_pin_note`, `delete_note`, `set_always_on_top`.
+  - TypeScript types in `src/types/note.ts`:
+    - `Note`: `{ id: string; title: string; preview: string; contentJson: string; plainText: string; pinned: boolean; createdAt: number; updatedAt: number }`
+    - `NoteSummary`: `{ id: string; title: string; preview: string; pinned: boolean; updatedAt: number }`
+  - `notesApi` in `src/api/notes.ts`:
+    - `listNotes(query?: string): Promise<NoteSummary[]>`
+    - `getNote(id: string): Promise<Note>`
+    - `createNote(): Promise<Note>`
+    - `saveNote(id: string, contentJson: string, plainText: string): Promise<NoteSummary>`
+    - `togglePinNote(id: string): Promise<NoteSummary>`
+    - `deleteNote(id: string): Promise<void>`
+    - `setAlwaysOnTop(alwaysOnTop: boolean): Promise<boolean>`
+    - `resetBrowserStoreForTests(): void`
+
+- [ ] **Step 1: Implement Tauri IPC commands in `src-tauri/src/commands.rs` and wire `src-tauri/src/lib.rs`**
+
+Create `D:\Projek Aksa\aksa-notes\src-tauri\src\commands.rs`:
+```rust
+use crate::models::{Note, NoteSummary};
+use crate::storage::NoteStore;
+use tauri::{State, WebviewWindow};
+
+#[tauri::command]
+pub fn list_notes(
+    store: State<'_, NoteStore>,
+    query: Option<String>,
+) -> Result<Vec<NoteSummary>, String> {
+    store.list_notes(query.as_deref())
+}
+
+#[tauri::command]
+pub fn get_note(store: State<'_, NoteStore>, id: String) -> Result<Note, String> {
+    store.get_note(&id)
+}
+
+#[tauri::command]
+pub fn create_note(store: State<'_, NoteStore>) -> Result<Note, String> {
+    store.create_note()
+}
+
+#[tauri::command]
+pub fn save_note(
+    store: State<'_, NoteStore>,
+    id: String,
+    content_json: String,
+    plain_text: String,
+) -> Result<NoteSummary, String> {
+    store.save_note(&id, content_json, plain_text)
+}
+
+#[tauri::command]
+pub fn toggle_pin_note(store: State<'_, NoteStore>, id: String) -> Result<NoteSummary, String> {
+    store.toggle_pin_note(&id)
+}
+
+#[tauri::command]
+pub fn delete_note(store: State<'_, NoteStore>, id: String) -> Result<(), String> {
+    store.delete_note(&id)
+}
+
+#[tauri::command]
+pub fn set_always_on_top(window: WebviewWindow, always_on_top: bool) -> Result<bool, String> {
+    window
+        .set_always_on_top(always_on_top)
+        .map_err(|e| format!("Gagal mengatur mode Pin Layar: {e}"))?;
+    Ok(always_on_top)
+}
+```
+
+Update `D:\Projek Aksa\aksa-notes\src-tauri\src\lib.rs`:
+```rust
+pub mod commands;
+pub mod models;
+pub mod storage;
+
+use storage::NoteStore;
+use tauri::Manager;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| format!("Gagal menentukan folder AppData: {e}"))?;
+            let store = NoteStore::new(app_data_dir);
+            store.ensure_initialized()?;
+            app.manage(store);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::list_notes,
+            commands::get_note,
+            commands::create_note,
+            commands::save_note,
+            commands::toggle_pin_note,
+            commands::delete_note,
+            commands::set_always_on_top,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+- [ ] **Step 2: Write failing frontend API tests (`src/api/notes.test.ts`)**
+
+Create `D:\Projek Aksa\aksa-notes\src\test-setup.ts`:
+```ts
+import '@testing-library/jest-dom/vitest';
+```
+
+Create `D:\Projek Aksa\aksa-notes\src\types\note.ts`:
+```ts
+export interface Note {
+  id: string;
+  title: string;
+  preview: string;
+  contentJson: string;
+  plainText: string;
+  pinned: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface NoteSummary {
+  id: string;
+  title: string;
+  preview: string;
+  pinned: boolean;
+  updatedAt: number;
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src\api\notes.test.ts`:
+```ts
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { notesApi, resetBrowserStoreForTests } from './notes';
+
+describe('notesApi', () => {
+  beforeEach(() => {
+    resetBrowserStoreForTests();
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__;
+  });
+
+  it('seeds welcome note once and supports create, save, search, pin, and delete', async () => {
+    const initial = await notesApi.listNotes();
+    expect(initial).toHaveLength(1);
+    expect(initial[0].title).toContain('Selamat Datang');
+
+    const created = await notesApi.createNote();
+    const updatedSummary = await notesApi.saveNote(
+      created.id,
+      JSON.stringify({ type: 'doc' }),
+      'Belajar Tauri\nRust desktop super enteng'
+    );
+    expect(updatedSummary.title).toBe('Belajar Tauri');
+    expect(updatedSummary.preview).toBe('Rust desktop super enteng');
+
+    const searchHits = await notesApi.listNotes('ENTENG');
+    expect(searchHits).toHaveLength(1);
+    expect(searchHits[0].id).toBe(created.id);
+
+    const pinned = await notesApi.togglePinNote(initial[0].id);
+    expect(pinned.pinned).toBe(true);
+
+    const ordered = await notesApi.listNotes();
+    expect(ordered[0].id).toBe(initial[0].id);
+
+    await notesApi.deleteNote(initial[0].id);
+    await notesApi.deleteNote(created.id);
+    expect(await notesApi.listNotes()).toHaveLength(0);
+  });
+
+  it('delegates to Tauri invoke with camelCase arguments when running inside Tauri', async () => {
+    const invokeSpy = vi.fn().mockResolvedValue({
+      id: 'n1',
+      title: 'Judul',
+      preview: 'Isi',
+      pinned: false,
+      updatedAt: 100,
+    });
+
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+      invoke: invokeSpy,
+    };
+
+    await notesApi.saveNote('n1', '{"type":"doc"}', 'Judul\nIsi');
+    expect(invokeSpy).toHaveBeenCalledWith(
+      'save_note',
+      {
+        id: 'n1',
+        contentJson: '{"type":"doc"}',
+        plainText: 'Judul\nIsi',
+      },
+      undefined
+    );
+  });
+});
+```
+
+- [ ] **Step 3: Run `npm test` to verify it fails**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: FAIL (`Cannot find module './notes'`).
+
+- [ ] **Step 4: Implement `src/api/notes.ts` and verify both Rust and Frontend tests pass**
+
+Create `D:\Projek Aksa\aksa-notes\src\api\notes.ts`:
+```ts
+import { invoke } from '@tauri-apps/api/core';
+import type { Note, NoteSummary } from '../types/note';
+
+const STORAGE_KEY = 'aksa-notes:browser-notes';
+const INIT_KEY = 'aksa-notes:browser-initialized';
+export const EMPTY_DOC_JSON = JSON.stringify({
+  type: 'doc',
+  content: [{ type: 'heading', attrs: { level: 1 } }, { type: 'paragraph' }],
+});
+
+const WELCOME_DOC_JSON = JSON.stringify({
+  type: 'doc',
+  content: [
+    {
+      type: 'heading',
+      attrs: { level: 1 },
+      content: [{ type: 'text', text: 'Selamat Datang di Aksa Notes' }],
+    },
+    {
+      type: 'paragraph',
+      content: [
+        {
+          type: 'text',
+          text: 'Tempat coret-coret cepat yang bersih dan ringan di mata.',
+        },
+      ],
+    },
+    {
+      type: 'taskList',
+      content: [
+        {
+          type: 'taskItem',
+          attrs: { checked: true },
+          content: [
+            {
+              type: 'paragraph',
+              content: [{ type: 'text', text: 'Baris pertama otomatis jadi judul catatan' }],
+            },
+          ],
+        },
+        {
+          type: 'taskItem',
+          attrs: { checked: false },
+          content: [
+            {
+              type: 'paragraph',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Klik ikon Pin di kanan atas buat tempel jendela di layar',
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+});
+
+const WELCOME_PLAIN_TEXT =
+  'Selamat Datang di Aksa Notes\nTempat coret-coret cepat yang bersih dan ringan di mata.\nBaris pertama otomatis jadi judul catatan\nKlik ikon Pin di kanan atas buat tempel jendela di layar';
+
+export function isTauriRuntime(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+export function extractTitleAndPreview(plainText: string): { title: string; preview: string } {
+  const lines = plainText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const rawTitle = lines[0] ?? 'Catatan Baru';
+  const rawPreview = lines[1] ?? 'Belum ada teks tambahan';
+
+  return {
+    title: rawTitle.length > 120 ? `${rawTitle.slice(0, 120)}…` : rawTitle,
+    preview: rawPreview.length > 90 ? `${rawPreview.slice(0, 90)}…` : rawPreview,
+  };
+}
+
+function readBrowserNotes(): Note[] {
+  if (!localStorage.getItem(INIT_KEY)) {
+    const now = Date.now();
+    const { title, preview } = extractTitleAndPreview(WELCOME_PLAIN_TEXT);
+    const welcome: Note = {
+      id: crypto.randomUUID(),
+      title,
+      preview,
+      contentJson: WELCOME_DOC_JSON,
+      plainText: WELCOME_PLAIN_TEXT,
+      pinned: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify([welcome]));
+    localStorage.setItem(INIT_KEY, '1');
+    return [welcome];
+  }
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Note[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBrowserNotes(notes: Note[]): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+}
+
+function toSummary(note: Note): NoteSummary {
+  return {
+    id: note.id,
+    title: note.title,
+    preview: note.preview,
+    pinned: note.pinned,
+    updatedAt: note.updatedAt,
+  };
+}
+
+let browserAlwaysOnTop = false;
+
+export function resetBrowserStoreForTests(): void {
+  localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(INIT_KEY);
+  browserAlwaysOnTop = false;
+}
+
+export const notesApi = {
+  async listNotes(query?: string): Promise<NoteSummary[]> {
+    if (isTauriRuntime()) {
+      return invoke<NoteSummary[]>('list_notes', { query: query ?? null });
+    }
+    const q = query?.trim().toLowerCase();
+    return readBrowserNotes()
+      .filter((note) => {
+        if (!q) return true;
+        return (
+          note.title.toLowerCase().includes(q) || note.plainText.toLowerCase().includes(q)
+        );
+      })
+      .map(toSummary)
+      .sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt);
+  },
+
+  async getNote(id: string): Promise<Note> {
+    if (isTauriRuntime()) {
+      return invoke<Note>('get_note', { id });
+    }
+    const found = readBrowserNotes().find((n) => n.id === id);
+    if (!found) throw new Error(`Catatan tidak ditemukan: ${id}`);
+    return found;
+  },
+
+  async createNote(): Promise<Note> {
+    if (isTauriRuntime()) {
+      return invoke<Note>('create_note');
+    }
+    const notes = readBrowserNotes();
+    const now = Date.now();
+    const created: Note = {
+      id: crypto.randomUUID(),
+      title: 'Catatan Baru',
+      preview: 'Belum ada teks tambahan',
+      contentJson: EMPTY_DOC_JSON,
+      plainText: '',
+      pinned: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+    writeBrowserNotes([created, ...notes]);
+    return created;
+  },
+
+  async saveNote(id: string, contentJson: string, plainText: string): Promise<NoteSummary> {
+    if (isTauriRuntime()) {
+      return invoke<NoteSummary>('save_note', { id, contentJson, plainText });
+    }
+    const notes = readBrowserNotes();
+    const idx = notes.findIndex((n) => n.id === id);
+    if (idx === -1) throw new Error(`Catatan tidak ditemukan: ${id}`);
+    const { title, preview } = extractTitleAndPreview(plainText);
+    const updated: Note = {
+      ...notes[idx],
+      title,
+      preview,
+      contentJson,
+      plainText,
+      updatedAt: Date.now(),
+    };
+    notes[idx] = updated;
+    writeBrowserNotes(notes);
+    return toSummary(updated);
+  },
+
+  async togglePinNote(id: string): Promise<NoteSummary> {
+    if (isTauriRuntime()) {
+      return invoke<NoteSummary>('toggle_pin_note', { id });
+    }
+    const notes = readBrowserNotes();
+    const idx = notes.findIndex((n) => n.id === id);
+    if (idx === -1) throw new Error(`Catatan tidak ditemukan: ${id}`);
+    const updated: Note = {
+      ...notes[idx],
+      pinned: !notes[idx].pinned,
+    };
+    notes[idx] = updated;
+    writeBrowserNotes(notes);
+    return toSummary(updated);
+  },
+
+  async deleteNote(id: string): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke<void>('delete_note', { id });
+      return;
+    }
+    const remaining = readBrowserNotes().filter((n) => n.id !== id);
+    writeBrowserNotes(remaining);
+  },
+
+  async setAlwaysOnTop(alwaysOnTop: boolean): Promise<boolean> {
+    if (isTauriRuntime()) {
+      return invoke<boolean>('set_always_on_top', { alwaysOnTop });
+    }
+    browserAlwaysOnTop = alwaysOnTop;
+    return browserAlwaysOnTop;
+  },
+};
+```
+
+Run both test suites in PowerShell:
+```powershell
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+Set-Location "D:\Projek Aksa\aksa-notes\src-tauri"
+cargo test
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: Rust `3 passed` and Vitest `2 passed`.
+
+- [ ] **Step 5: Commit Task 2**
+
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+git add src-tauri/src/commands.rs src-tauri/src/lib.rs src/test-setup.ts src/types/note.ts src/api/
+git commit -m "feat(ipc): connect Tauri commands and typed frontend notes API"
+```
+
+---
+
+### Task 3: Warm/Sleek Design Tokens, Frameless Titlebar & Collapsible Sidebar
+
+**Files:**
+- Create: `D:\Projek Aksa\aksa-notes\src\styles\theme.css`
+- Create: `D:\Projek Aksa\aksa-notes\src\components\Titlebar.tsx`
+- Create: `D:\Projek Aksa\aksa-notes\src\components\Sidebar.tsx`
+- Create: `D:\Projek Aksa\aksa-notes\src\components\Sidebar.test.tsx`
+
+**Interfaces:**
+- Consumes: `NoteSummary` from `src/types/note.ts` and `@tauri-apps/api/window` (`getCurrentWindow`) when in Tauri runtime.
+- Produces:
+  - `EditorFormatState`: `{ bold: boolean; italic: boolean; bulletList: boolean; taskList: boolean }`
+  - `EditorFormatAction`: `'bold' | 'italic' | 'bulletList' | 'taskList'`
+  - `Titlebar` component (`TitlebarProps`)
+  - `Sidebar` component (`SidebarProps`)
+
+- [ ] **Step 1: Write failing tests for `Sidebar` (`src/components/Sidebar.test.tsx`)**
+
+Create `D:\Projek Aksa\aksa-notes\src\components\Sidebar.test.tsx`:
+```tsx
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { describe, expect, it, vi } from 'vitest';
+import { Sidebar } from './Sidebar';
+import type { NoteSummary } from '../types/note';
+
+const sampleNotes: NoteSummary[] = [
+  {
+    id: 'pinned-1',
+    title: 'Target Minggu Ini',
+    preview: 'Beresin UI notepad',
+    pinned: true,
+    updatedAt: 1730970000000,
+  },
+  {
+    id: 'normal-1',
+    title: 'Catatan Belanja',
+    preview: 'Kopi dan susu',
+    pinned: false,
+    updatedAt: 1730980000000,
+  },
+];
+
+describe('Sidebar', () => {
+  it('separates Disematkan and Catatan groups and fires selection, pin, delete, and search callbacks', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onTogglePin = vi.fn();
+    const onDelete = vi.fn();
+    const onSearchChange = vi.fn();
+
+    render(
+      <Sidebar
+        collapsed={false}
+        notes={sampleNotes}
+        activeNoteId="normal-1"
+        searchQuery=""
+        onSearchChange={onSearchChange}
+        onSelectNote={onSelect}
+        onTogglePinNote={onTogglePin}
+        onDeleteNote={onDelete}
+      />
+    );
+
+    expect(screen.getByText('Disematkan')).toBeInTheDocument();
+    expect(screen.getByText('Catatan')).toBeInTheDocument();
+
+    await user.click(screen.getByText('Target Minggu Ini'));
+    expect(onSelect).toHaveBeenCalledWith('pinned-1');
+
+    await user.click(screen.getByRole('button', { name: 'Lepas sematan Target Minggu Ini' }));
+    expect(onTogglePin).toHaveBeenCalledWith('pinned-1');
+
+    await user.click(screen.getByRole('button', { name: 'Hapus Catatan Belanja' }));
+    expect(onDelete).toHaveBeenCalledWith('normal-1');
+
+    await user.type(screen.getByPlaceholderText('Cari catatan...'), 'k');
+    expect(onSearchChange).toHaveBeenCalledWith('k');
+  });
+});
+```
+
+- [ ] **Step 2: Run `npm test` to verify it fails**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: FAIL (`Cannot find module './Sidebar'`).
+
+- [ ] **Step 3: Create `src/styles/theme.css`, `src/components/Titlebar.tsx`, and `src/components/Sidebar.tsx`**
+
+Create `D:\Projek Aksa\aksa-notes\src\styles\theme.css`:
+```css
+:root,
+[data-theme='light'] {
+  --bg-editor: #faf9f6;
+  --bg-sidebar: #f2f0eb;
+  --bg-elevated: rgba(250, 249, 246, 0.86);
+  --bg-hover: rgba(28, 28, 30, 0.05);
+  --bg-active-card: #ffffff;
+  --bg-search: rgba(28, 28, 30, 0.055);
+  --text-primary: #1c1c1e;
+  --text-secondary: #6e6d68;
+  --text-muted: #9a9890;
+  --accent: #d99b26;
+  --accent-soft: rgba(217, 155, 38, 0.14);
+  --danger: #d64545;
+  --border-subtle: rgba(28, 28, 30, 0.08);
+  --card-shadow: 0 1px 3px rgba(28, 28, 30, 0.06);
+  color-scheme: light;
+}
+
+[data-theme='dark'] {
+  --bg-editor: #18181a;
+  --bg-sidebar: #121214;
+  --bg-elevated: rgba(24, 24, 26, 0.86);
+  --bg-hover: rgba(255, 255, 255, 0.055);
+  --bg-active-card: #232326;
+  --bg-search: rgba(255, 255, 255, 0.06);
+  --text-primary: #f2f2f7;
+  --text-secondary: #8e8e93;
+  --text-muted: #636368;
+  --accent: #e5a93b;
+  --accent-soft: rgba(229, 169, 59, 0.18);
+  --danger: #ef6464;
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --card-shadow: 0 1px 4px rgba(0, 0, 0, 0.32);
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-editor);
+  color: var(--text-primary);
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, BlinkMacSystemFont, system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background: var(--bg-editor);
+  border: 1px solid var(--border-subtle);
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+/* Titlebar */
+.titlebar {
+  height: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 0 10px;
+  background: var(--bg-elevated);
+  backdrop-filter: blur(18px) saturate(160%);
+  border-bottom: 1px solid var(--border-subtle);
+  user-select: none;
+  gap: 8px;
+}
+
+.titlebar-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.titlebar-center {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, transform 90ms ease-out;
+}
+
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.icon-btn:active {
+  transform: scale(0.95);
+}
+
+.icon-btn.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.pin-screen-btn {
+  width: auto;
+  padding: 0 9px;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.window-controls {
+  display: flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.win-btn {
+  width: 36px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.win-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.win-btn.win-close:hover {
+  background: #e04343;
+  color: #ffffff;
+}
+
+/* Main Workspace */
+.workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  position: relative;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 268px;
+  min-width: 268px;
+  height: 100%;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 160ms ease;
+  overflow: hidden;
+}
+
+.sidebar.is-collapsed {
+  width: 0;
+  min-width: 0;
+  border-right-color: transparent;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-search-wrap {
+  padding: 12px 12px 8px;
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 9px;
+  background: var(--bg-search);
+  border: 1px solid transparent;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.search-box:focus-within {
+  border-color: var(--accent);
+  background: var(--bg-active-card);
+}
+
+.search-box input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.search-box input::placeholder {
+  color: var(--text-muted);
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 10px 16px;
+}
+
+.sidebar-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 10px 8px 6px;
+}
+
+.note-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  margin-bottom: 3px;
+  border-radius: 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color 120ms ease;
+}
+
+.note-card:hover {
+  background: var(--bg-hover);
+}
+
+.note-card.is-selected {
+  background: var(--bg-active-card);
+  border-color: var(--border-subtle);
+  box-shadow: var(--card-shadow);
+}
+
+.note-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.note-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.note-card-date {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.note-card-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.note-card:hover .note-card-actions,
+.note-card:focus-within .note-card-actions {
+  opacity: 1;
+}
+
+.mini-action-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.mini-action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.mini-action-btn.is-pinned {
+  color: var(--accent);
+}
+
+.mini-action-btn.is-danger:hover {
+  color: var(--danger);
+}
+
+.sidebar-empty {
+  padding: 28px 14px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* Editor Surface */
+.editor-pane {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-editor);
+  position: relative;
+}
+
+.editor-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 28px 28px 64px;
+}
+
+.editor-column {
+  max-width: 65ch;
+  margin: 0 auto;
+  width: 100%;
+}
+
+.editor-status {
+  position: absolute;
+  right: 16px;
+  bottom: 12px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.editor-status.is-error {
+  color: var(--danger);
+}
+
+/* TipTap Typography */
+.tiptap-surface {
+  outline: none;
+  min-height: 300px;
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--text-primary);
+}
+
+.tiptap-surface h1 {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  margin: 0 0 14px 0;
+  color: var(--text-primary);
+}
+
+.tiptap-surface p {
+  margin: 0 0 10px 0;
+}
+
+.tiptap-surface ul:not([data-type='taskList']) {
+  margin: 4px 0 12px;
+  padding-left: 22px;
+}
+
+.tiptap-surface ul[data-type='taskList'] {
+  list-style: none;
+  padding: 0;
+  margin: 6px 0 12px;
+}
+
+.tiptap-surface ul[data-type='taskList'] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.tiptap-surface ul[data-type='taskList'] li > label {
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.tiptap-surface ul[data-type='taskList'] li > label input[type='checkbox'] {
+  appearance: none;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.tiptap-surface ul[data-type='taskList'] li > label input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.tiptap-surface ul[data-type='taskList'] li > label input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 4px;
+  height: 8px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.tiptap-surface ul[data-type='taskList'] li[data-checked='true'] > div {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.tiptap-surface ul[data-type='taskList'] li > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.tiptap-surface ul[data-type='taskList'] li > div p {
+  margin: 0;
+}
+
+.tiptap-surface .is-empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  float: left;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Empty Workspace State */
+.empty-workspace {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  padding: 24px;
+  text-align: center;
+}
+
+.primary-btn {
+  border: none;
+  border-radius: 9px;
+  padding: 9px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  background: var(--accent);
+  color: #ffffff;
+  cursor: pointer;
+  transition: opacity 120ms ease, transform 90ms ease-out;
+}
+
+.primary-btn:hover {
+  opacity: 0.92;
+}
+
+.primary-btn:active {
+  transform: scale(0.97);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(130, 130, 135, 0.24);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(130, 130, 135, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src\components\Titlebar.tsx`:
+```tsx
+import {
+  Bold,
+  CheckSquare,
+  Italic,
+  List,
+  Minus,
+  Moon,
+  PanelLeft,
+  Pin,
+  Square,
+  SquarePen,
+  Sun,
+  X,
+} from 'lucide-react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isTauriRuntime } from '../api/notes';
+
+export interface EditorFormatState {
+  bold: boolean;
+  italic: boolean;
+  bulletList: boolean;
+  taskList: boolean;
+}
+
+export type EditorFormatAction = 'bold' | 'italic' | 'bulletList' | 'taskList';
+
+export interface TitlebarProps {
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+  onCreateNote: () => void;
+  hasActiveNote: boolean;
+  formatState: EditorFormatState;
+  onFormatAction: (action: EditorFormatAction) => void;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
+  alwaysOnTop: boolean;
+  onToggleAlwaysOnTop: () => void;
+}
+
+export function Titlebar({
+  sidebarCollapsed,
+  onToggleSidebar,
+  onCreateNote,
+  hasActiveNote,
+  formatState,
+  onFormatAction,
+  theme,
+  onToggleTheme,
+  alwaysOnTop,
+  onToggleAlwaysOnTop,
+}: TitlebarProps) {
+  const handleMinimize = () => {
+    if (isTauriRuntime()) {
+      void getCurrentWindow().minimize();
+    }
+  };
+
+  const handleToggleMaximize = () => {
+    if (isTauriRuntime()) {
+      void getCurrentWindow().toggleMaximize();
+    }
+  };
+
+  const handleClose = () => {
+    if (isTauriRuntime()) {
+      void getCurrentWindow().close();
+    }
+  };
+
+  return (
+    <header className="titlebar" data-tauri-drag-region>
+      <div className="titlebar-group">
+        <button
+          type="button"
+          className={`icon-btn ${!sidebarCollapsed ? 'is-active' : ''}`}
+          onClick={onToggleSidebar}
+          title="Tampilkan/Sembunyikan Sidebar (Ctrl+\)"
+          aria-label="Toggle Sidebar"
+        >
+          <PanelLeft size={16} />
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onCreateNote}
+          title="Catatan Baru (Ctrl+N)"
+          aria-label="Catatan Baru"
+        >
+          <SquarePen size={16} />
+        </button>
+      </div>
+
+      {hasActiveNote ? (
+        <div className="titlebar-center">
+          <button
+            type="button"
+            className={`icon-btn ${formatState.bold ? 'is-active' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onFormatAction('bold')}
+            title="Tebal (Ctrl+B)"
+            aria-label="Format Tebal"
+          >
+            <Bold size={15} />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn ${formatState.italic ? 'is-active' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onFormatAction('italic')}
+            title="Miring (Ctrl+I)"
+            aria-label="Format Miring"
+          >
+            <Italic size={15} />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn ${formatState.bulletList ? 'is-active' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onFormatAction('bulletList')}
+            title="Daftar Poin"
+            aria-label="Daftar Poin"
+          >
+            <List size={15} />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn ${formatState.taskList ? 'is-active' : ''}`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => onFormatAction('taskList')}
+            title="Checklist"
+            aria-label="Format Checklist"
+          >
+            <CheckSquare size={15} />
+          </button>
+        </div>
+      ) : (
+        <div data-tauri-drag-region />
+      )}
+
+      <div className="titlebar-group">
+        <button
+          type="button"
+          className={`icon-btn pin-screen-btn ${alwaysOnTop ? 'is-active' : ''}`}
+          onClick={onToggleAlwaysOnTop}
+          title="Sematkan jendela selalu di atas layar"
+          aria-label="Pin ke Layar"
+          aria-pressed={alwaysOnTop}
+        >
+          <Pin size={14} />
+          <span>{alwaysOnTop ? 'Tersemat' : 'Pin'}</span>
+        </button>
+
+        <button
+          type="button"
+          className="icon-btn"
+          onClick={onToggleTheme}
+          title={theme === 'dark' ? 'Ganti ke Mode Terang' : 'Ganti ke Mode Gelap'}
+          aria-label="Ganti Tema"
+        >
+          {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+        </button>
+
+        <div className="window-controls">
+          <button
+            type="button"
+            className="win-btn"
+            onClick={handleMinimize}
+            aria-label="Minimize"
+            title="Perkecil"
+          >
+            <Minus size={14} />
+          </button>
+          <button
+            type="button"
+            className="win-btn"
+            onClick={handleToggleMaximize}
+            aria-label="Maximize"
+            title="Perbesar"
+          >
+            <Square size={12} />
+          </button>
+          <button
+            type="button"
+            className="win-btn win-close"
+            onClick={handleClose}
+            aria-label="Close"
+            title="Tutup"
+          >
+            <X size={15} />
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src\components\Sidebar.tsx`:
+```tsx
+import { forwardRef } from 'react';
+import { Pin, Search, Trash2, X } from 'lucide-react';
+import type { NoteSummary } from '../types/note';
+
+export interface SidebarProps {
+  collapsed: boolean;
+  notes: NoteSummary[];
+  activeNoteId: string | null;
+  searchQuery: string;
+  onSearchChange: (query: string) => void;
+  onSelectNote: (id: string) => void;
+  onTogglePinNote: (id: string) => void;
+  onDeleteNote: (id: string) => void;
+}
+
+function formatShortTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+
+  if (sameDay) {
+    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+  }
+  return date.toLocaleDateString('id-ID', { day: 'numeric', month: 'short' });
+}
+
+export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sidebar(
+  {
+    collapsed,
+    notes,
+    activeNoteId,
+    searchQuery,
+    onSearchChange,
+    onSelectNote,
+    onTogglePinNote,
+    onDeleteNote,
+  },
+  searchInputRef
+) {
+  const pinnedNotes = notes.filter((note) => note.pinned);
+  const regularNotes = notes.filter((note) => !note.pinned);
+
+  const renderCard = (note: NoteSummary) => {
+    const isSelected = note.id === activeNoteId;
+    return (
+      <div
+        key={note.id}
+        role="button"
+        tabIndex={0}
+        className={`note-card ${isSelected ? 'is-selected' : ''}`}
+        onClick={() => onSelectNote(note.id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onSelectNote(note.id);
+          }
+        }}
+      >
+        <div className="note-card-header">
+          <span className="note-card-title">{note.title}</span>
+          <div className="note-card-actions">
+            <button
+              type="button"
+              className={`mini-action-btn ${note.pinned ? 'is-pinned' : ''}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onTogglePinNote(note.id);
+              }}
+              aria-label={
+                note.pinned ? `Lepas sematan ${note.title}` : `Sematkan ${note.title}`
+              }
+              title={note.pinned ? 'Lepas sematan catatan' : 'Sematkan di atas'}
+            >
+              <Pin size={13} />
+            </button>
+            <button
+              type="button"
+              className="mini-action-btn is-danger"
+              onClick={(e) => {
+                e.stopPropagation();
+                onDeleteNote(note.id);
+              }}
+              aria-label={`Hapus ${note.title}`}
+              title="Hapus catatan"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+        <div className="note-card-meta">
+          <span className="note-card-date">{formatShortTime(note.updatedAt)}</span>
+          <span className="note-card-preview">{note.preview}</span>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <aside className={`sidebar ${collapsed ? 'is-collapsed' : ''}`} aria-hidden={collapsed}>
+      <div className="sidebar-search-wrap">
+        <div className="search-box">
+          <Search size={14} color="var(--text-muted)" />
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Cari catatan..."
+            aria-label="Cari catatan"
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              className="mini-action-btn"
+              onClick={() => onSearchChange('')}
+              aria-label="Bersihkan pencarian"
+            >
+              <X size={13} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="sidebar-list">
+        {notes.length === 0 ? (
+          <div className="sidebar-empty">
+            {searchQuery ? 'Tidak ada catatan yang cocok.' : 'Belum ada catatan.'}
+          </div>
+        ) : (
+          <>
+            {pinnedNotes.length > 0 && (
+              <section>
+                <div className="sidebar-section-label">Disematkan</div>
+                {pinnedNotes.map(renderCard)}
+              </section>
+            )}
+            {regularNotes.length > 0 && (
+              <section>
+                {pinnedNotes.length > 0 && (
+                  <div className="sidebar-section-label">Catatan</div>
+                )}
+                {regularNotes.map(renderCard)}
+              </section>
+            )}
+          </>
+        )}
+      </div>
+    </aside>
+  );
+});
+```
+
+- [ ] **Step 4: Run `npm test` to verify Sidebar and API tests pass**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: PASS (`Sidebar.test.tsx` + `notes.test.ts` green).
+
+- [ ] **Step 5: Commit Task 3**
+
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+git add src/styles/theme.css src/components/Titlebar.tsx src/components/Sidebar.tsx src/components/Sidebar.test.tsx
+git commit -m "feat(ui): add warm/sleek theme tokens, frameless titlebar, and note sidebar"
+```
+
+---
+
+### Task 4: Structured iPhone-Style Rich Text Editor (`NoteEditor`)
+
+**Files:**
+- Create: `D:\Projek Aksa\aksa-notes\src\components\NoteEditor.tsx`
+- Create: `D:\Projek Aksa\aksa-notes\src\components\NoteEditor.test.tsx`
+
+**Interfaces:**
+- Consumes: `Note` from `src/types/note.ts`, `EditorFormatAction` and `EditorFormatState` from `src/components/Titlebar.tsx`.
+- Produces:
+  - `NoteEditorHandle`: `{ runFormatAction: (action: EditorFormatAction) => void }`
+  - `NoteEditor` component (`NoteEditorProps`: `{ note: Note; saveStatus: 'saved' | 'saving' | 'error'; onContentChange: (noteId: string, contentJson: string, plainText: string) => void; onFormatStateChange: (state: EditorFormatState) => void }`)
+
+- [ ] **Step 1: Write failing tests for `NoteEditor` (`src/components/NoteEditor.test.tsx`)**
+
+Create `D:\Projek Aksa\aksa-notes\src\components\NoteEditor.test.tsx`:
+```tsx
+import { createRef } from 'react';
+import { act, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { NoteEditor, serializeDocToPlainText, type NoteEditorHandle } from './NoteEditor';
+import type { Note } from '../types/note';
+
+const sampleNote: Note = {
+  id: 'note-1',
+  title: 'Judul Awal',
+  preview: 'Paragraf isi pertama',
+  contentJson: JSON.stringify({
+    type: 'doc',
+    content: [
+      {
+        type: 'heading',
+        attrs: { level: 1 },
+        content: [{ type: 'text', text: 'Judul Awal' }],
+      },
+      {
+        type: 'paragraph',
+        content: [{ type: 'text', text: 'Paragraf isi pertama' }],
+      },
+    ],
+  }),
+  plainText: 'Judul Awal\nParagraf isi pertama',
+  pinned: false,
+  createdAt: 1000,
+  updatedAt: 1000,
+};
+
+describe('NoteEditor', () => {
+  it('renders first block as H1 title and extracts clean line-separated plain text', () => {
+    const onContentChange = vi.fn();
+    const onFormatStateChange = vi.fn();
+    const ref = createRef<NoteEditorHandle>();
+
+    render(
+      <NoteEditor
+        ref={ref}
+        note={sampleNote}
+        saveStatus="saved"
+        onContentChange={onContentChange}
+        onFormatStateChange={onFormatStateChange}
+      />
+    );
+
+    const heading = screen.getByRole('heading', { level: 1 });
+    expect(heading).toHaveTextContent('Judul Awal');
+    expect(screen.getByText('Paragraf isi pertama')).toBeInTheDocument();
+
+    expect(
+      serializeDocToPlainText({
+        type: 'doc',
+        content: [
+          { type: 'heading', content: [{ type: 'text', text: 'Judul Catatan' }] },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Baris kedua' }] },
+        ],
+      })
+    ).toBe('Judul Catatan\nBaris kedua');
+
+    act(() => {
+      ref.current?.runFormatAction('taskList');
+    });
+    expect(ref.current).not.toBeNull();
+  });
+});
+```
+
+- [ ] **Step 2: Run `npm test` to verify it fails**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: FAIL (`Cannot find module './NoteEditor'`).
+
+- [ ] **Step 3: Implement `src/components/NoteEditor.tsx`**
+
+Create `D:\Projek Aksa\aksa-notes\src\components\NoteEditor.tsx`:
+```tsx
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { EditorContent, useEditor, type JSONContent } from '@tiptap/react';
+import StarterKit from '@tiptap/starter-kit';
+import Document from '@tiptap/extension-document';
+import Placeholder from '@tiptap/extension-placeholder';
+import TaskList from '@tiptap/extension-task-list';
+import TaskItem from '@tiptap/extension-task-item';
+import type { Note } from '../types/note';
+import { EMPTY_DOC_JSON } from '../api/notes';
+import type { EditorFormatAction, EditorFormatState } from './Titlebar';
+
+const TitleDocument = Document.extend({
+  content: 'heading block*',
+});
+
+export interface NoteEditorHandle {
+  runFormatAction: (action: EditorFormatAction) => void;
+}
+
+export interface NoteEditorProps {
+  note: Note;
+  saveStatus: 'saved' | 'saving' | 'error';
+  onContentChange: (noteId: string, contentJson: string, plainText: string) => void;
+  onFormatStateChange: (state: EditorFormatState) => void;
+}
+
+function parseDocSafely(contentJson: string): JSONContent {
+  try {
+    return JSON.parse(contentJson) as JSONContent;
+  } catch {
+    return JSON.parse(EMPTY_DOC_JSON) as JSONContent;
+  }
+}
+
+export function serializeDocToPlainText(doc: JSONContent): string {
+  const lines: string[] = [];
+
+  const collectInlineText = (node: JSONContent): string => {
+    if (typeof node.text === 'string') return node.text;
+    if (!node.content) return '';
+    return node.content.map(collectInlineText).join('');
+  };
+
+  const walkBlock = (node: JSONContent) => {
+    if (node.type === 'heading' || node.type === 'paragraph') {
+      lines.push(collectInlineText(node));
+      return;
+    }
+    if (node.content) {
+      node.content.forEach(walkBlock);
+    }
+  };
+
+  doc.content?.forEach(walkBlock);
+  return lines.join('\n').trimEnd();
+}
+
+export const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(function NoteEditor(
+  { note, saveStatus, onContentChange, onFormatStateChange },
+  ref
+) {
+  const activeNoteIdRef = useRef(note.id);
+  const suppressUpdateRef = useRef(false);
+
+  const editor = useEditor({
+    extensions: [
+      TitleDocument,
+      StarterKit.configure({
+        document: false,
+        heading: { levels: [1] },
+        blockquote: false,
+        codeBlock: false,
+        code: false,
+        horizontalRule: false,
+      }),
+      TaskList,
+      TaskItem.configure({
+        nested: false,
+      }),
+      Placeholder.configure({
+        includeChildren: true,
+        placeholder: ({ node }) =>
+          node.type.name === 'heading' ? 'Judul catatan...' : 'Mulai menulis...',
+      }),
+    ],
+    content: parseDocSafely(note.contentJson),
+    editorProps: {
+      attributes: {
+        class: 'tiptap-surface',
+        spellcheck: 'false',
+      },
+    },
+    onUpdate: ({ editor: currentEditor }) => {
+      if (suppressUpdateRef.current) return;
+      const json = currentEditor.getJSON();
+      const plainText = serializeDocToPlainText(json);
+      onContentChange(activeNoteIdRef.current, JSON.stringify(json), plainText);
+    },
+    onSelectionUpdate: ({ editor: currentEditor }) => {
+      onFormatStateChange({
+        bold: currentEditor.isActive('bold'),
+        italic: currentEditor.isActive('italic'),
+        bulletList: currentEditor.isActive('bulletList'),
+        taskList: currentEditor.isActive('taskList'),
+      });
+    },
+    onTransaction: ({ editor: currentEditor }) => {
+      onFormatStateChange({
+        bold: currentEditor.isActive('bold'),
+        italic: currentEditor.isActive('italic'),
+        bulletList: currentEditor.isActive('bulletList'),
+        taskList: currentEditor.isActive('taskList'),
+      });
+    },
+  });
+
+  useEffect(() => {
+    if (!editor) return;
+    if (activeNoteIdRef.current !== note.id) {
+      activeNoteIdRef.current = note.id;
+      suppressUpdateRef.current = true;
+      editor.commands.setContent(parseDocSafely(note.contentJson), false);
+      suppressUpdateRef.current = false;
+    }
+  }, [editor, note.id, note.contentJson]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      runFormatAction: (action: EditorFormatAction) => {
+        if (!editor) return;
+        const chain = editor.chain().focus();
+        switch (action) {
+          case 'bold':
+            chain.toggleBold().run();
+            break;
+          case 'italic':
+            chain.toggleItalic().run();
+            break;
+          case 'bulletList':
+            if (editor.isActive('heading')) {
+              chain.insertContentAt(editor.state.selection.to, { type: 'paragraph' }).toggleBulletList().run();
+            } else {
+              chain.toggleBulletList().run();
+            }
+            break;
+          case 'taskList':
+            if (editor.isActive('heading')) {
+              chain.insertContentAt(editor.state.selection.to, { type: 'paragraph' }).toggleTaskList().run();
+            } else {
+              chain.toggleTaskList().run();
+            }
+            break;
+        }
+      },
+    }),
+    [editor]
+  );
+
+  const statusLabel =
+    saveStatus === 'saving'
+      ? 'Menyimpan…'
+      : saveStatus === 'error'
+        ? 'Gagal menyimpan — coba ketik ulang'
+        : '';
+
+  return (
+    <main className="editor-pane">
+      <div className="editor-scroll">
+        <div className="editor-column">
+          <EditorContent editor={editor} />
+        </div>
+      </div>
+      {statusLabel && (
+        <div className={`editor-status ${saveStatus === 'error' ? 'is-error' : ''}`}>
+          {statusLabel}
+        </div>
+      )}
+    </main>
+  );
+});
+```
+
+- [ ] **Step 4: Run `npm test` to verify `NoteEditor` tests pass**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: PASS (`NoteEditor.test.tsx`, `Sidebar.test.tsx`, `notes.test.ts` all green).
+
+- [ ] **Step 5: Commit Task 4**
+
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+git add src/components/NoteEditor.tsx src/components/NoteEditor.test.tsx
+git commit -m "feat(editor): add structured TipTap note editor with title heading and checklists"
+```
+
+---
+
+### Task 5: App Integration, Auto-Save Flush, Focus Mode & Native Build Verification
+
+**Files:**
+- Create: `D:\Projek Aksa\aksa-notes\src\App.tsx`
+- Create: `D:\Projek Aksa\aksa-notes\src\main.tsx`
+- Create: `D:\Projek Aksa\aksa-notes\src\App.test.tsx`
+
+**Interfaces:**
+- Consumes: `notesApi` (`src/api/notes.ts`), `Titlebar` (`src/components/Titlebar.tsx`), `Sidebar` (`src/components/Sidebar.tsx`), `NoteEditor` (`src/components/NoteEditor.tsx`), and `src/styles/theme.css`.
+- Produces: Complete Aksa Notes desktop application in `src/App.tsx` and entry point `src/main.tsx`.
+
+- [ ] **Step 1: Write failing integration tests (`src/App.test.tsx`)**
+
+Create `D:\Projek Aksa\aksa-notes\src\App.test.tsx`:
+```tsx
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { beforeEach, describe, expect, it } from 'vitest';
+import { App } from './App';
+import { resetBrowserStoreForTests } from './api/notes';
+
+describe('App integration', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetBrowserStoreForTests();
+  });
+
+  it('loads welcome note, toggles dark mode, and auto-collapses sidebar into Focus Mode when pinned to screen', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { level: 1, name: /Selamat Datang di Aksa Notes/i })
+      ).toBeInTheDocument();
+    });
+
+    // Toggle theme
+    const initialTheme = document.documentElement.getAttribute('data-theme');
+    await user.click(screen.getByRole('button', { name: 'Ganti Tema' }));
+    expect(document.documentElement.getAttribute('data-theme')).not.toBe(initialTheme);
+
+    // Activate Pin to Screen -> auto-collapses sidebar into Focus Mode
+    const pinBtn = screen.getByRole('button', { name: 'Pin ke Layar' });
+    await user.click(pinBtn);
+    expect(pinBtn).toHaveAttribute('aria-pressed', 'true');
+
+    const sidebar = document.querySelector('.sidebar');
+    expect(sidebar).toHaveClass('is-collapsed');
+
+    // User can still manually re-open sidebar while pinned
+    await user.click(screen.getByRole('button', { name: 'Toggle Sidebar' }));
+    expect(sidebar).not.toHaveClass('is-collapsed');
+  });
+
+  it('shows clean empty state when all notes are deleted and creates a fresh note on click', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Selamat Datang di Aksa Notes')).toBeInTheDocument();
+    });
+
+    await user.click(
+      screen.getByRole('button', { name: /Hapus Selamat Datang di Aksa Notes/i })
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Belum ada catatan aktif')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Buat Catatan Baru' }));
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run `npm test` to verify `App.test.tsx` fails**
+
+Run in PowerShell:
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+```
+Expected: FAIL (`Cannot find module './App'`).
+
+- [ ] **Step 3: Implement `src/App.tsx` and `src/main.tsx`**
+
+Create `D:\Projek Aksa\aksa-notes\src\App.tsx`:
+```tsx
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { notesApi } from './api/notes';
+import type { Note, NoteSummary } from './types/note';
+import {
+  Titlebar,
+  type EditorFormatAction,
+  type EditorFormatState,
+} from './components/Titlebar';
+import { Sidebar } from './components/Sidebar';
+import { NoteEditor, type NoteEditorHandle } from './components/NoteEditor';
+
+const THEME_STORAGE_KEY = 'aksa-notes:theme';
+const AUTOSAVE_DELAY_MS = 300;
+
+function getInitialTheme(): 'light' | 'dark' {
+  const saved = localStorage.getItem(THEME_STORAGE_KEY);
+  if (saved === 'light' || saved === 'dark') return saved;
+  if (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches
+  ) {
+    return 'dark';
+  }
+  return 'light';
+}
+
+function sortSummaries(items: NoteSummary[]): NoteSummary[] {
+  return [...items].sort(
+    (a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt
+  );
+}
+
+interface PendingDraft {
+  noteId: string;
+  contentJson: string;
+  plainText: string;
+}
+
+export function App() {
+  const [theme, setTheme] = useState<'light' | 'dark'>(getInitialTheme);
+  const [notes, setNotes] = useState<NoteSummary[]>([]);
+  const [activeNote, setActiveNote] = useState<Note | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [autoCollapsedByPin, setAutoCollapsedByPin] = useState(false);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
+  const [formatState, setFormatState] = useState<EditorFormatState>({
+    bold: false,
+    italic: false,
+    bulletList: false,
+    taskList: false,
+  });
+
+  const editorRef = useRef<NoteEditorHandle>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const pendingDraftRef = useRef<PendingDraft | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  const flushPendingSave = useCallback(async () => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    const draft = pendingDraftRef.current;
+    if (!draft) return;
+    pendingDraftRef.current = null;
+
+    try {
+      setSaveStatus('saving');
+      const summary = await notesApi.saveNote(
+        draft.noteId,
+        draft.contentJson,
+        draft.plainText
+      );
+      if (searchQueryRef.current.trim()) {
+        const refreshed = await notesApi.listNotes(searchQueryRef.current);
+        setNotes(refreshed);
+      } else {
+        setNotes((prev) =>
+          sortSummaries(prev.map((item) => (item.id === summary.id ? summary : item)))
+        );
+      }
+      setSaveStatus('saved');
+    } catch {
+      pendingDraftRef.current = draft;
+      setSaveStatus('error');
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const initialList = await notesApi.listNotes();
+      if (cancelled) return;
+      setNotes(initialList);
+      if (initialList.length > 0) {
+        const full = await notesApi.getNote(initialList[0].id);
+        if (!cancelled) setActiveNote(full);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Refresh list when searchQuery changes
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const filtered = await notesApi.listNotes(searchQuery);
+      if (!cancelled) setNotes(filtered);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery]);
+
+  // Flush before closing window
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      void flushPendingSave();
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [flushPendingSave]);
+
+  const handleSelectNote = useCallback(
+    async (id: string) => {
+      if (activeNote?.id === id) return;
+      await flushPendingSave();
+      const full = await notesApi.getNote(id);
+      setActiveNote(full);
+    },
+    [activeNote?.id, flushPendingSave]
+  );
+
+  const handleCreateNote = useCallback(async () => {
+    await flushPendingSave();
+    if (searchQueryRef.current) {
+      setSearchQuery('');
+    }
+    const created = await notesApi.createNote();
+    const list = await notesApi.listNotes();
+    setNotes(list);
+    setActiveNote(created);
+  }, [flushPendingSave]);
+
+  const handleContentChange = useCallback(
+    (noteId: string, contentJson: string, plainText: string) => {
+      pendingDraftRef.current = { noteId, contentJson, plainText };
+      setSaveStatus('saving');
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+      saveTimerRef.current = window.setTimeout(() => {
+        void flushPendingSave();
+      }, AUTOSAVE_DELAY_MS);
+    },
+    [flushPendingSave]
+  );
+
+  const handleTogglePinNote = useCallback(
+    async (id: string) => {
+      await flushPendingSave();
+      const updated = await notesApi.togglePinNote(id);
+      setNotes((prev) =>
+        sortSummaries(prev.map((item) => (item.id === updated.id ? updated : item)))
+      );
+      setActiveNote((prev) =>
+        prev && prev.id === updated.id ? { ...prev, pinned: updated.pinned } : prev
+      );
+    },
+    [flushPendingSave]
+  );
+
+  const handleDeleteNote = useCallback(
+    async (id: string) => {
+      if (pendingDraftRef.current?.noteId === id) {
+        pendingDraftRef.current = null;
+        if (saveTimerRef.current !== null) {
+          window.clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = null;
+        }
+      } else {
+        await flushPendingSave();
+      }
+
+      await notesApi.deleteNote(id);
+      const remaining = await notesApi.listNotes(searchQueryRef.current);
+      setNotes(remaining);
+
+      if (activeNote?.id === id) {
+        if (remaining.length > 0) {
+          const nextFull = await notesApi.getNote(remaining[0].id);
+          setActiveNote(nextFull);
+        } else {
+          setActiveNote(null);
+        }
+      }
+    },
+    [activeNote?.id, flushPendingSave]
+  );
+
+  const handleToggleAlwaysOnTop = useCallback(async () => {
+    const next = !alwaysOnTop;
+    const confirmed = await notesApi.setAlwaysOnTop(next);
+    setAlwaysOnTop(confirmed);
+    if (confirmed) {
+      if (!sidebarCollapsed) {
+        setSidebarCollapsed(true);
+        setAutoCollapsedByPin(true);
+      }
+    } else if (autoCollapsedByPin) {
+      setSidebarCollapsed(false);
+      setAutoCollapsedByPin(false);
+    }
+  }, [alwaysOnTop, autoCollapsedByPin, sidebarCollapsed]);
+
+  const handleToggleSidebar = useCallback(() => {
+    setAutoCollapsedByPin(false);
+    setSidebarCollapsed((prev) => !prev);
+  }, []);
+
+  const handleFormatAction = useCallback((action: EditorFormatAction) => {
+    editorRef.current?.runFormatAction(action);
+  }, []);
+
+  // Global keyboard shortcuts: Ctrl+N, Ctrl+\, Ctrl+F
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+
+      if (e.key.toLowerCase() === 'n') {
+        e.preventDefault();
+        void handleCreateNote();
+      } else if (e.key === '\\') {
+        e.preventDefault();
+        handleToggleSidebar();
+      } else if (e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setSidebarCollapsed(false);
+        requestAnimationFrame(() => searchInputRef.current?.focus());
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleCreateNote, handleToggleSidebar]);
+
+  return (
+    <div className="app-shell">
+      <Titlebar
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={handleToggleSidebar}
+        onCreateNote={() => void handleCreateNote()}
+        hasActiveNote={activeNote !== null}
+        formatState={formatState}
+        onFormatAction={handleFormatAction}
+        theme={theme}
+        onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+        alwaysOnTop={alwaysOnTop}
+        onToggleAlwaysOnTop={() => void handleToggleAlwaysOnTop()}
+      />
+
+      <div className="workspace">
+        <Sidebar
+          ref={searchInputRef}
+          collapsed={sidebarCollapsed}
+          notes={notes}
+          activeNoteId={activeNote?.id ?? null}
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          onSelectNote={(id) => void handleSelectNote(id)}
+          onTogglePinNote={(id) => void handleTogglePinNote(id)}
+          onDeleteNote={(id) => void handleDeleteNote(id)}
+        />
+
+        {activeNote ? (
+          <NoteEditor
+            ref={editorRef}
+            note={activeNote}
+            saveStatus={saveStatus}
+            onContentChange={handleContentChange}
+            onFormatStateChange={setFormatState}
+          />
+        ) : (
+          <div className="empty-workspace">
+            <div>Belum ada catatan aktif</div>
+            <button
+              type="button"
+              className="primary-btn"
+              onClick={() => void handleCreateNote()}
+            >
+              Buat Catatan Baru
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+Create `D:\Projek Aksa\aksa-notes\src\main.tsx`:
+```tsx
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import './styles/theme.css';
+import { App } from './App';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>
+);
+```
+
+- [ ] **Step 4: Run all tests, frontend production build, and Rust native desktop build**
+
+Run in PowerShell:
+```powershell
+$env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+Set-Location "D:\Projek Aksa\aksa-notes"
+npm test
+npm run build
+Set-Location "D:\Projek Aksa\aksa-notes\src-tauri"
+cargo test
+cargo build
+```
+Expected:
+- `npm test`: all 4 test files pass (`notes.test.ts`, `Sidebar.test.tsx`, `NoteEditor.test.tsx`, `App.test.tsx`).
+- `npm run build`: TypeScript + Vite bundle succeeds into `dist/`.
+- `cargo test`: all Rust unit tests pass.
+- `cargo build`: compiles native Windows binary `src-tauri/target/debug/aksa-notes.exe` with zero errors.
+
+- [ ] **Step 5: Commit Task 5**
+
+```powershell
+Set-Location "D:\Projek Aksa\aksa-notes"
+git add src/App.tsx src/main.tsx src/App.test.tsx
+git commit -m "feat(app): integrate Aksa Notes editor, auto-save flush, shortcuts, and Always-on-Top focus mode"
+```
