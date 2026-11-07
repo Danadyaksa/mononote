@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { notesApi } from './api/notes';
+import { getCurrentWindow } from '@tauri-apps/api/window';
+import { isTauriRuntime, notesApi } from './api/notes';
 import type { Note, NoteSummary } from './types/note';
 import {
   Titlebar,
@@ -126,6 +127,44 @@ export function App() {
   }, [searchQuery]);
 
   // Flush before closing window
+  const isClosingRef = useRef(false);
+
+  const handleCloseWindow = useCallback(async () => {
+    if (isClosingRef.current) return;
+    isClosingRef.current = true;
+    await flushPendingSave();
+    if (isTauriRuntime()) {
+      await getCurrentWindow().close();
+    }
+  }, [flushPendingSave]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let unlisten: (() => void) | undefined;
+    let isMounted = true;
+
+    void (async () => {
+      const cleanup = await getCurrentWindow().onCloseRequested(async (event) => {
+        if (isClosingRef.current) return;
+        event.preventDefault();
+        isClosingRef.current = true;
+        await flushPendingSave();
+        await getCurrentWindow().close();
+      });
+      if (isMounted) {
+        unlisten = cleanup;
+      } else {
+        cleanup();
+      }
+    })();
+
+    return () => {
+      isMounted = false;
+      if (unlisten) unlisten();
+    };
+  }, [flushPendingSave]);
+
   useEffect(() => {
     const handleBeforeUnload = () => {
       void flushPendingSave();
@@ -270,6 +309,7 @@ export function App() {
         onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
         alwaysOnTop={alwaysOnTop}
         onToggleAlwaysOnTop={() => void handleToggleAlwaysOnTop()}
+        onClose={() => void handleCloseWindow()}
       />
 
       <div className="workspace">

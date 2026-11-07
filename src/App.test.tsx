@@ -1,8 +1,8 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { resetBrowserStoreForTests } from './api/notes';
+import { notesApi, resetBrowserStoreForTests } from './api/notes';
 
 describe('App integration', () => {
   beforeEach(() => {
@@ -58,5 +58,30 @@ describe('App integration', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { level: 1 })).toBeInTheDocument();
     });
+  });
+
+  it('flushes pending unsaved draft immediately when Close button is clicked without waiting 300ms', async () => {
+    const user = userEvent.setup();
+    const saveSpy = vi.spyOn(notesApi, 'saveNote');
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { level: 1, name: /Selamat Datang di Mononote/i })
+      ).toBeInTheDocument();
+    });
+
+    const formatBtn = screen.getByRole('button', { name: 'Daftar Poin' });
+    await user.click(formatBtn);
+
+    // The 300ms autosave timer has not fired yet
+    expect(saveSpy).not.toHaveBeenCalled();
+
+    // Clicking Close triggers immediate flush without waiting 300ms
+    const closeBtn = screen.getByRole('button', { name: 'Close' });
+    await user.click(closeBtn);
+
+    expect(saveSpy).toHaveBeenCalledTimes(1);
   });
 });

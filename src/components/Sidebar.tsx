@@ -53,6 +53,7 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
         className={`note-card ${isSelected ? 'is-selected' : ''}`}
         onClick={() => onSelectNote(note.id)}
         onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             onSelectNote(note.id);
@@ -99,7 +100,11 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
   };
 
   return (
-    <aside className={`sidebar ${collapsed ? 'is-collapsed' : ''}`} aria-hidden={collapsed}>
+    <aside
+      className={`sidebar ${collapsed ? 'is-collapsed' : ''}`}
+      aria-hidden={collapsed}
+      inert={collapsed || undefined}
+    >
       <div className="sidebar-search-wrap">
         <div className="search-box">
           <Search size={14} color="var(--text-muted)" />

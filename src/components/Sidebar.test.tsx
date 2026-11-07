@@ -110,5 +110,44 @@ describe('Sidebar', () => {
     const aside = container.querySelector('aside.sidebar');
     expect(aside).toHaveClass('is-collapsed');
     expect(aside).toHaveAttribute('aria-hidden', 'true');
+    expect(aside).toHaveAttribute('inert');
+  });
+
+  it('activates Pin and Delete buttons on Enter or Space without triggering onSelectNote', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const onTogglePin = vi.fn();
+    const onDelete = vi.fn();
+
+    render(
+      <Sidebar
+        collapsed={false}
+        notes={sampleNotes}
+        activeNoteId="normal-1"
+        searchQuery=""
+        onSearchChange={vi.fn()}
+        onSelectNote={onSelect}
+        onTogglePinNote={onTogglePin}
+        onDeleteNote={onDelete}
+      />
+    );
+
+    const pinBtn = screen.getByRole('button', { name: 'Lepas sematan Target Minggu Ini' });
+    pinBtn.focus();
+    await user.keyboard('{Enter}');
+    expect(onTogglePin).toHaveBeenCalledWith('pinned-1');
+    expect(onSelect).not.toHaveBeenCalled();
+
+    const deleteBtn = screen.getByRole('button', { name: 'Hapus Catatan Belanja' });
+    deleteBtn.focus();
+    await user.keyboard(' ');
+    expect(onDelete).toHaveBeenCalledWith('normal-1');
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // Directly activating the card itself still selects the note
+    const card = screen.getByText('Target Minggu Ini').closest('.note-card') as HTMLElement;
+    card.focus();
+    await user.keyboard('{Enter}');
+    expect(onSelect).toHaveBeenCalledWith('pinned-1');
   });
 });

@@ -35,6 +35,7 @@ export interface TitlebarProps {
   onToggleTheme: () => void;
   alwaysOnTop: boolean;
   onToggleAlwaysOnTop: () => void;
+  onClose?: () => void;
 }
 
 export function Titlebar({
@@ -48,6 +49,7 @@ export function Titlebar({
   onToggleTheme,
   alwaysOnTop,
   onToggleAlwaysOnTop,
+  onClose,
 }: TitlebarProps) {
   const handleMinimize = () => {
     if (isTauriRuntime()) {
@@ -62,6 +64,10 @@ export function Titlebar({
   };
 
   const handleClose = () => {
+    if (onClose) {
+      onClose();
+      return;
+    }
     if (isTauriRuntime()) {
       void getCurrentWindow().close();
     }
