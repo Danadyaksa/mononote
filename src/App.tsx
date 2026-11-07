@@ -132,9 +132,17 @@ export function App() {
   const handleCloseWindow = useCallback(async () => {
     if (isClosingRef.current) return;
     isClosingRef.current = true;
-    await flushPendingSave();
-    if (isTauriRuntime()) {
-      await getCurrentWindow().close();
+    try {
+      await flushPendingSave();
+    } finally {
+      if (isTauriRuntime()) {
+        try {
+          await getCurrentWindow().destroy();
+        } catch {
+          isClosingRef.current = false;
+          await getCurrentWindow().close();
+        }
+      }
     }
   }, [flushPendingSave]);
 
@@ -149,8 +157,11 @@ export function App() {
         if (isClosingRef.current) return;
         event.preventDefault();
         isClosingRef.current = true;
-        await flushPendingSave();
-        await getCurrentWindow().close();
+        try {
+          await flushPendingSave();
+        } finally {
+          await getCurrentWindow().destroy();
+        }
       });
       if (isMounted) {
         unlisten = cleanup;
