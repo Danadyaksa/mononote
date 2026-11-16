@@ -1,6 +1,6 @@
 import { forwardRef } from 'react';
-import { Pin, Search, Trash2, X } from 'lucide-react';
-import type { NoteSummary } from '../types/note';
+import { FileText, ListTree, Pin, Search, Trash2, X } from 'lucide-react';
+import type { HeadingItem, NoteSummary, SidebarTab } from '../types/note';
 
 export interface SidebarProps {
   collapsed: boolean;
@@ -11,6 +11,12 @@ export interface SidebarProps {
   onSelectNote: (id: string) => void;
   onTogglePinNote: (id: string) => void;
   onDeleteNote: (id: string) => void;
+  activeTab?: SidebarTab;
+  onTabChange?: (tab: SidebarTab) => void;
+  headings?: HeadingItem[];
+  activeHeadingIndex?: number | null;
+  onSelectHeading?: (index: number) => void;
+  activeNoteTitle?: string;
 }
 
 function formatShortTime(timestamp: number): string {
@@ -37,6 +43,12 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
     onSelectNote,
     onTogglePinNote,
     onDeleteNote,
+    activeTab = 'notes',
+    onTabChange,
+    headings = [],
+    activeHeadingIndex = null,
+    onSelectHeading,
+    activeNoteTitle,
   },
   searchInputRef
 ) {
@@ -105,54 +117,130 @@ export const Sidebar = forwardRef<HTMLInputElement, SidebarProps>(function Sideb
       aria-hidden={collapsed}
       inert={collapsed || undefined}
     >
-      <div className="sidebar-search-wrap">
-        <div className="search-box">
-          <Search size={14} color="var(--text-muted)" />
-          <input
-            ref={searchInputRef}
-            type="text"
-            value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Cari catatan..."
-            aria-label="Cari catatan"
-          />
-          {searchQuery && (
-            <button
-              type="button"
-              className="mini-action-btn"
-              onClick={() => onSearchChange('')}
-              aria-label="Bersihkan pencarian"
-            >
-              <X size={13} />
-            </button>
-          )}
+      <div className="sidebar-tabs-wrap">
+        <div className="sidebar-tabs" role="tablist" aria-label="Navigasi Sidebar">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'notes'}
+            className={`sidebar-tab ${activeTab === 'notes' ? 'is-active' : ''}`}
+            onClick={() => onTabChange?.('notes')}
+            title="Daftar Semua Catatan"
+          >
+            <FileText size={13} />
+            <span>Semua Catatan</span>
+            <span className="sidebar-tab-badge">{notes.length}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'outline'}
+            className={`sidebar-tab ${activeTab === 'outline' ? 'is-active' : ''}`}
+            onClick={() => onTabChange?.('outline')}
+            title="Daftar Isi / Subjudul (Alt+O)"
+          >
+            <ListTree size={13} />
+            <span>Daftar Isi</span>
+            {headings.length > 0 && (
+              <span className="sidebar-tab-badge is-highlight">{headings.length}</span>
+            )}
+          </button>
         </div>
       </div>
 
-      <div className="sidebar-list">
-        {notes.length === 0 ? (
-          <div className="sidebar-empty">
-            {searchQuery ? 'Tidak ada catatan yang cocok.' : 'Belum ada catatan.'}
+      {activeTab === 'notes' ? (
+        <>
+          <div className="sidebar-search-wrap">
+            <div className="search-box">
+              <Search size={14} color="var(--text-muted)" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => onSearchChange(e.target.value)}
+                placeholder="Cari catatan..."
+                aria-label="Cari catatan"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  className="mini-action-btn"
+                  onClick={() => onSearchChange('')}
+                  aria-label="Bersihkan pencarian"
+                >
+                  <X size={13} />
+                </button>
+              )}
+            </div>
           </div>
-        ) : (
-          <>
-            {pinnedNotes.length > 0 && (
-              <section>
-                <div className="sidebar-section-label">Disematkan</div>
-                {pinnedNotes.map(renderCard)}
-              </section>
-            )}
-            {regularNotes.length > 0 && (
-              <section>
+
+          <div className="sidebar-list">
+            {notes.length === 0 ? (
+              <div className="sidebar-empty">
+                {searchQuery ? 'Tidak ada catatan yang cocok.' : 'Belum ada catatan.'}
+              </div>
+            ) : (
+              <>
                 {pinnedNotes.length > 0 && (
-                  <div className="sidebar-section-label">Catatan</div>
+                  <section>
+                    <div className="sidebar-section-label">Disematkan</div>
+                    {pinnedNotes.map(renderCard)}
+                  </section>
                 )}
-                {regularNotes.map(renderCard)}
-              </section>
+                {regularNotes.length > 0 && (
+                  <section>
+                    {pinnedNotes.length > 0 && (
+                      <div className="sidebar-section-label">Catatan</div>
+                    )}
+                    {regularNotes.map(renderCard)}
+                  </section>
+                )}
+              </>
             )}
-          </>
-        )}
-      </div>
+          </div>
+        </>
+      ) : (
+        <div className="sidebar-outline-wrap">
+          {!activeNoteId ? (
+            <div className="sidebar-empty">
+              <ListTree size={22} className="sidebar-empty-icon" />
+              <span>Pilih atau buka catatan untuk melihat daftar isi.</span>
+            </div>
+          ) : headings.length === 0 ? (
+            <div className="sidebar-empty">
+              <ListTree size={22} className="sidebar-empty-icon" />
+              <span className="sidebar-empty-title">Belum ada subjudul</span>
+              <p className="sidebar-empty-hint">
+                Ketik <code># Judul</code> atau <code>## Subjudul</code> di catatan untuk membuat daftar isi otomatis.
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className="outline-header">
+                <span className="outline-header-title">{activeNoteTitle || 'Catatan'}</span>
+                <span className="outline-header-count">{headings.length} bagian</span>
+              </div>
+              <nav className="outline-list" aria-label="Daftar Isi Catatan">
+                {headings.map((item) => {
+                  const isActive = activeHeadingIndex === item.index;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={`outline-item outline-level-${item.level} ${isActive ? 'is-active' : ''}`}
+                      onClick={() => onSelectHeading?.(item.index)}
+                      title={`Lompat ke ${item.text}`}
+                    >
+                      <span className="outline-level-indicator" />
+                      <span className="outline-item-text">{item.text}</span>
+                    </button>
+                  );
+                })}
+              </nav>
+            </>
+          )}
+        </div>
+      )}
     </aside>
   );
 });

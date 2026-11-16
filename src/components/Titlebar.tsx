@@ -5,6 +5,7 @@ import {
   FolderOpen,
   Italic,
   List,
+  ListTree,
   Minus,
   Moon,
   PanelLeft,
@@ -32,6 +33,8 @@ export interface TitlebarProps {
   onCreateNote: () => void;
   onOpenFile?: () => void;
   onSaveAs?: () => void;
+  onToggleOutline?: () => void;
+  isOutlineActive?: boolean;
   hasActiveNote: boolean;
   formatState: EditorFormatState;
   onFormatAction: (action: EditorFormatAction) => void;
@@ -48,6 +51,8 @@ export function Titlebar({
   onCreateNote,
   onOpenFile,
   onSaveAs,
+  onToggleOutline,
+  isOutlineActive = false,
   hasActiveNote,
   formatState,
   onFormatAction,
@@ -57,25 +62,36 @@ export function Titlebar({
   onToggleAlwaysOnTop,
   onClose,
 }: TitlebarProps) {
-  const handleMinimize = () => {
+  const handleMinimize = async () => {
     if (isTauriRuntime()) {
-      void getCurrentWindow().minimize();
+      try {
+        await getCurrentWindow().minimize();
+      } catch (err) {
+        console.error('Failed to minimize window', err);
+      }
     }
   };
 
-  const handleToggleMaximize = () => {
+  const handleMaximize = async () => {
     if (isTauriRuntime()) {
-      void getCurrentWindow().toggleMaximize();
+      try {
+        await getCurrentWindow().toggleMaximize();
+      } catch (err) {
+        console.error('Failed to toggle maximize', err);
+      }
     }
   };
 
-  const handleClose = () => {
+  const handleClose = async () => {
     if (onClose) {
       onClose();
-      return;
     }
     if (isTauriRuntime()) {
-      void getCurrentWindow().close();
+      try {
+        await getCurrentWindow().destroy();
+      } catch (err) {
+        console.error('Failed to close window', err);
+      }
     }
   };
 
@@ -109,6 +125,18 @@ export function Titlebar({
             aria-label="Buka File"
           >
             <FolderOpen size={16} />
+          </button>
+        )}
+        {onToggleOutline && (
+          <button
+            type="button"
+            className={`icon-btn ${isOutlineActive ? 'is-active' : ''}`}
+            onClick={onToggleOutline}
+            title="Daftar Isi Catatan (Alt+O)"
+            aria-label="Toggle Daftar Isi"
+            disabled={!hasActiveNote}
+          >
+            <ListTree size={16} />
           </button>
         )}
       </div>
@@ -150,14 +178,16 @@ export function Titlebar({
             className={`icon-btn ${formatState.taskList ? 'is-active' : ''}`}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => onFormatAction('taskList')}
-            title="Checklist"
-            aria-label="Format Checklist"
+            title="Daftar Tugas / Checklist"
+            aria-label="Daftar Tugas"
           >
             <CheckSquare size={15} />
           </button>
         </div>
       ) : (
-        <div data-tauri-drag-region />
+        <div className="titlebar-center is-empty">
+          <span className="titlebar-app-title">Mononote</span>
+        </div>
       )}
 
       <div className="titlebar-group">
@@ -176,14 +206,17 @@ export function Titlebar({
           type="button"
           className={`icon-btn pin-screen-btn ${alwaysOnTop ? 'is-active' : ''}`}
           onClick={onToggleAlwaysOnTop}
-          title="Sematkan jendela selalu di atas layar"
+          title={
+            alwaysOnTop
+              ? 'Lepas Pin di Layar (kembali normal)'
+              : 'Pin di Layar (selalu tampil di atas aplikasi lain)'
+          }
           aria-label="Pin ke Layar"
           aria-pressed={alwaysOnTop}
         >
-          <Pin size={14} />
-          <span>{alwaysOnTop ? 'Tersemat' : 'Pin'}</span>
+          <Pin size={14} className={alwaysOnTop ? 'is-pinned-icon' : ''} />
+          <span>Pin</span>
         </button>
-
         <button
           type="button"
           className="icon-btn"
@@ -193,34 +226,33 @@ export function Titlebar({
         >
           {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
         </button>
-
         <div className="window-controls">
           <button
             type="button"
-            className="win-btn"
+            className="win-btn win-min"
             onClick={handleMinimize}
-            aria-label="Minimize"
-            title="Perkecil"
+            title="Minimalkan"
+            aria-label="Minimalkan"
           >
-            <Minus size={14} />
+            <Minus size={13} />
           </button>
           <button
             type="button"
-            className="win-btn"
-            onClick={handleToggleMaximize}
-            aria-label="Maximize"
-            title="Perbesar"
+            className="win-btn win-max"
+            onClick={handleMaximize}
+            title="Maksimalkan"
+            aria-label="Maksimalkan"
           >
-            <Square size={12} />
+            <Square size={11} />
           </button>
           <button
             type="button"
             className="win-btn win-close"
             onClick={handleClose}
+            title="Tutup Mononote"
             aria-label="Close"
-            title="Tutup"
           >
-            <X size={15} />
+            <X size={14} />
           </button>
         </div>
       </div>

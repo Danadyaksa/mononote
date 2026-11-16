@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { isTauriRuntime, notesApi } from './api/notes';
-import type { Note, NoteSummary } from './types/note';
+import type { Note, NoteSummary, SidebarTab } from './types/note';
 import {
   Titlebar,
   type EditorFormatAction,
@@ -13,6 +13,7 @@ import {
   parseMarkdownToTipTap,
   serializeTipTapToMarkdown,
 } from './utils/markdown';
+import { extractHeadingsFromJson } from './utils/outline';
 
 const THEME_STORAGE_KEY = 'mononote:theme';
 const AUTOSAVE_DELAY_MS = 300;
@@ -49,6 +50,8 @@ export function App() {
   const [activeNote, setActiveNote] = useState<Note | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('notes');
+  const [activeHeadingIndex, setActiveHeadingIndex] = useState<number | null>(null);
   const [autoCollapsedByPin, setAutoCollapsedByPin] = useState(false);
   const [alwaysOnTop, setAlwaysOnTop] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'error'>('saved');
@@ -565,18 +568,46 @@ export function App() {
     }
   }, [alwaysOnTop, autoCollapsedByPin, sidebarCollapsed]);
 
+  const headings = useMemo(() => {
+    if (!activeNote?.contentJson) return [];
+    return extractHeadingsFromJson(activeNote.contentJson);
+  }, [activeNote?.contentJson]);
+
   const handleToggleSidebar = useCallback(() => {
     setAutoCollapsedByPin(false);
     setSidebarCollapsed((prev) => !prev);
+  }, []);
+
+  const handleToggleOutline = useCallback(() => {
+    setAutoCollapsedByPin(false);
+    if (sidebarCollapsed) {
+      setSidebarCollapsed(false);
+      setSidebarTab('outline');
+    } else if (sidebarTab === 'notes') {
+      setSidebarTab('outline');
+    } else {
+      setSidebarTab('notes');
+    }
+  }, [sidebarCollapsed, sidebarTab]);
+
+  const handleSelectHeading = useCallback((index: number) => {
+    setActiveHeadingIndex(index);
+    editorRef.current?.scrollToHeading(index);
   }, []);
 
   const handleFormatAction = useCallback((action: EditorFormatAction) => {
     editorRef.current?.runFormatAction(action);
   }, []);
 
-  // Global keyboard shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+\, Ctrl+F
+  // Global keyboard shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+\, Ctrl+F, Alt+O
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        handleToggleOutline();
+        return;
+      }
+
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
 
@@ -599,12 +630,13 @@ export function App() {
       } else if (e.key.toLowerCase() === 'f') {
         e.preventDefault();
         setSidebarCollapsed(false);
+        setSidebarTab('notes');
         requestAnimationFrame(() => searchInputRef.current?.focus());
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [flushPendingSave, handleCreateNote, handleOpenMarkdownFile, handleSaveAs, handleToggleSidebar]);
+  }, [flushPendingSave, handleCreateNote, handleOpenMarkdownFile, handleSaveAs, handleToggleOutline, handleToggleSidebar]);
 
   return (
     <div className="app-shell">
@@ -614,6 +646,8 @@ export function App() {
         onCreateNote={() => void handleCreateNote()}
         onOpenFile={() => void handleOpenMarkdownFile()}
         onSaveAs={() => void handleSaveAs()}
+        onToggleOutline={handleToggleOutline}
+        isOutlineActive={!sidebarCollapsed && sidebarTab === 'outline'}
         hasActiveNote={activeNote !== null}
         formatState={formatState}
         onFormatAction={handleFormatAction}
@@ -635,6 +669,12 @@ export function App() {
           onSelectNote={(id) => void handleSelectNote(id)}
           onTogglePinNote={(id) => void handleTogglePinNote(id)}
           onDeleteNote={(id) => void handleDeleteNote(id)}
+          activeTab={sidebarTab}
+          onTabChange={setSidebarTab}
+          headings={headings}
+          activeHeadingIndex={activeHeadingIndex}
+          onSelectHeading={handleSelectHeading}
+          activeNoteTitle={activeNote?.title}
         />
 
         {activeNote ? (
@@ -644,6 +684,7 @@ export function App() {
             saveStatus={saveStatus}
             onContentChange={handleContentChange}
             onFormatStateChange={setFormatState}
+            onActiveHeadingChange={setActiveHeadingIndex}
           />
         ) : (
           <div className="empty-workspace">

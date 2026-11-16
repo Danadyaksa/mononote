@@ -24,3 +24,12 @@ export interface MarkdownFileData {
   filename: string;
   content: string;
 }
+
+export interface HeadingItem {
+  id: string;
+  index: number;
+  level: number;
+  text: string;
+}
+
+export type SidebarTab = 'notes' | 'outline';

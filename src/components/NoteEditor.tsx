@@ -15,6 +15,7 @@ const TitleDocument = Document.extend({
 
 export interface NoteEditorHandle {
   runFormatAction: (action: EditorFormatAction) => void;
+  scrollToHeading: (index: number) => void;
 }
 
 export interface NoteEditorProps {
@@ -22,6 +23,7 @@ export interface NoteEditorProps {
   saveStatus: 'saved' | 'saving' | 'error';
   onContentChange: (noteId: string, contentJson: string, plainText: string) => void;
   onFormatStateChange: (state: EditorFormatState) => void;
+  onActiveHeadingChange?: (index: number) => void;
 }
 
 function parseDocSafely(contentJson: string): JSONContent {
@@ -56,11 +58,13 @@ export function serializeDocToPlainText(doc: JSONContent): string {
 }
 
 export const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(function NoteEditor(
-  { note, saveStatus, onContentChange, onFormatStateChange },
+  { note, saveStatus, onContentChange, onFormatStateChange, onActiveHeadingChange },
   ref
 ) {
   const activeNoteIdRef = useRef(note.id);
   const suppressUpdateRef = useRef(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const rafIdRef = useRef<number | null>(null);
 
   const emitFormatState = (currentEditor: Editor) => {
     onFormatStateChange({
@@ -123,6 +127,41 @@ export const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(function
     }
   }, [editor, note.id, note.contentJson]);
 
+  const handleScroll = () => {
+    if (!onActiveHeadingChange || !scrollContainerRef.current) return;
+    if (rafIdRef.current !== null) {
+      cancelAnimationFrame(rafIdRef.current);
+    }
+    rafIdRef.current = requestAnimationFrame(() => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      const headingEls = container.querySelectorAll('.tiptap-surface h1, .tiptap-surface h2, .tiptap-surface h3');
+      if (headingEls.length === 0) return;
+
+      const containerTop = container.getBoundingClientRect().top;
+      let activeIdx = 0;
+
+      for (let i = 0; i < headingEls.length; i++) {
+        const rect = headingEls[i].getBoundingClientRect();
+        if (rect.top - containerTop <= 140) {
+          activeIdx = i;
+        } else {
+          break;
+        }
+      }
+
+      onActiveHeadingChange(activeIdx);
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+      }
+    };
+  }, []);
+
   useImperativeHandle(
     ref,
     () => ({
@@ -154,6 +193,21 @@ export const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(function
             break;
         }
       },
+      scrollToHeading: (index: number) => {
+        const container = scrollContainerRef.current;
+        if (!container) return;
+        const headingEls = container.querySelectorAll('.tiptap-surface h1, .tiptap-surface h2, .tiptap-surface h3');
+        const targetEl = headingEls[index] as HTMLElement | undefined;
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          targetEl.classList.remove('heading-target-flash');
+          void targetEl.offsetWidth;
+          targetEl.classList.add('heading-target-flash');
+          setTimeout(() => {
+            targetEl.classList.remove('heading-target-flash');
+          }, 1400);
+        }
+      },
     }),
     [editor]
   );
@@ -167,7 +221,7 @@ export const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(function
 
   return (
     <main className="editor-pane">
-      <div className="editor-scroll">
+      <div className="editor-scroll" ref={scrollContainerRef} onScroll={handleScroll}>
         <div className="editor-column">
           <EditorContent editor={editor} />
         </div>
