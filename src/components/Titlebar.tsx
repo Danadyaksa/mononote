@@ -1,6 +1,8 @@
 import {
   Bold,
   CheckSquare,
+  Download,
+  FolderOpen,
   Italic,
   List,
   Minus,
@@ -28,6 +30,8 @@ export interface TitlebarProps {
   sidebarCollapsed: boolean;
   onToggleSidebar: () => void;
   onCreateNote: () => void;
+  onOpenFile?: () => void;
+  onSaveAs?: () => void;
   hasActiveNote: boolean;
   formatState: EditorFormatState;
   onFormatAction: (action: EditorFormatAction) => void;
@@ -42,6 +46,8 @@ export function Titlebar({
   sidebarCollapsed,
   onToggleSidebar,
   onCreateNote,
+  onOpenFile,
+  onSaveAs,
   hasActiveNote,
   formatState,
   onFormatAction,
@@ -94,6 +100,17 @@ export function Titlebar({
         >
           <SquarePen size={16} />
         </button>
+        {onOpenFile && (
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onOpenFile}
+            title="Buka File Markdown (Ctrl+O)"
+            aria-label="Buka File"
+          >
+            <FolderOpen size={16} />
+          </button>
+        )}
       </div>
 
       {hasActiveNote ? (
@@ -144,6 +161,17 @@ export function Titlebar({
       )}
 
       <div className="titlebar-group">
+        {hasActiveNote && onSaveAs && (
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={onSaveAs}
+            title="Simpan Sebagai Markdown (Ctrl+Shift+S)"
+            aria-label="Simpan Sebagai"
+          >
+            <Download size={15} />
+          </button>
+        )}
         <button
           type="button"
           className={`icon-btn pin-screen-btn ${alwaysOnTop ? 'is-active' : ''}`}

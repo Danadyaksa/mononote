@@ -26,6 +26,10 @@ pub fn run() {
             commands::toggle_pin_note,
             commands::delete_note,
             commands::set_always_on_top,
+            commands::open_markdown_file_dialog,
+            commands::read_markdown_file,
+            commands::save_markdown_file,
+            commands::save_as_markdown_dialog,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

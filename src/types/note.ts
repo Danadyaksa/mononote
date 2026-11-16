@@ -7,6 +7,7 @@ export interface Note {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  filePath?: string;
 }
 
 export interface NoteSummary {
@@ -15,4 +16,11 @@ export interface NoteSummary {
   preview: string;
   pinned: boolean;
   updatedAt: number;
+  isExternal?: boolean;
+}
+
+export interface MarkdownFileData {
+  path: string;
+  filename: string;
+  content: string;
 }

@@ -76,7 +76,7 @@ export const NoteEditor = forwardRef<NoteEditorHandle, NoteEditorProps>(function
       TitleDocument,
       StarterKit.configure({
         document: false,
-        heading: { levels: [1] },
+        heading: { levels: [1, 2, 3] },
         blockquote: false,
         codeBlock: false,
         code: false,

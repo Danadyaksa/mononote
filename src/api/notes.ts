@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { Note, NoteSummary } from '../types/note';
+import type { MarkdownFileData, Note, NoteSummary } from '../types/note';
 
 const STORAGE_KEY = 'mononote:browser-notes';
 const INIT_KEY = 'mononote:browser-initialized';
@@ -227,5 +227,43 @@ export const notesApi = {
     }
     browserAlwaysOnTop = alwaysOnTop;
     return browserAlwaysOnTop;
+  },
+
+  async openMarkdownFileDialog(): Promise<MarkdownFileData | null> {
+    if (isTauriRuntime()) {
+      return invoke<MarkdownFileData | null>('open_markdown_file_dialog');
+    }
+    return null;
+  },
+
+  async readMarkdownFile(path: string): Promise<MarkdownFileData> {
+    if (isTauriRuntime()) {
+      return invoke<MarkdownFileData>('read_markdown_file', { path });
+    }
+    return {
+      path,
+      filename: 'dummy.md',
+      content: '# Dummy Markdown\nIsi file dummy',
+    };
+  },
+
+  async saveMarkdownFile(path: string, content: string): Promise<void> {
+    if (isTauriRuntime()) {
+      await invoke<void>('save_markdown_file', { path, content });
+      return;
+    }
+  },
+
+  async saveAsMarkdownDialog(
+    defaultFilename: string | undefined,
+    content: string
+  ): Promise<string | null> {
+    if (isTauriRuntime()) {
+      return invoke<string | null>('save_as_markdown_dialog', {
+        defaultFilename: defaultFilename || null,
+        content,
+      });
+    }
+    return defaultFilename ? `/mock/${defaultFilename}` : '/mock/Catatan.md';
   },
 };

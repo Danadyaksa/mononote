@@ -9,6 +9,10 @@ import {
 } from './components/Titlebar';
 import { Sidebar } from './components/Sidebar';
 import { NoteEditor, type NoteEditorHandle } from './components/NoteEditor';
+import {
+  parseMarkdownToTipTap,
+  serializeTipTapToMarkdown,
+} from './utils/markdown';
 
 const THEME_STORAGE_KEY = 'mononote:theme';
 const AUTOSAVE_DELAY_MS = 300;
@@ -36,6 +40,7 @@ interface PendingDraft {
   noteId: string;
   contentJson: string;
   plainText: string;
+  filePath?: string;
 }
 
 export function App() {
@@ -61,6 +66,12 @@ export function App() {
   const searchQueryRef = useRef(searchQuery);
   searchQueryRef.current = searchQuery;
 
+  const activeNoteRef = useRef<Note | null>(null);
+  activeNoteRef.current = activeNote;
+
+  // In-memory store for open external markdown files
+  const externalNotesMapRef = useRef<Map<string, Note>>(new Map());
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -77,19 +88,53 @@ export function App() {
 
     try {
       setSaveStatus('saving');
-      const summary = await notesApi.saveNote(
-        draft.noteId,
-        draft.contentJson,
-        draft.plainText
-      );
-      if (searchQueryRef.current.trim()) {
-        const refreshed = await notesApi.listNotes(searchQueryRef.current);
-        setNotes(refreshed);
-      } else {
+
+      if (draft.filePath) {
+        // Save back to external markdown file on disk
+        let docObj: Record<string, unknown> = {};
+        try {
+          docObj = JSON.parse(draft.contentJson) as Record<string, unknown>;
+        } catch {
+          docObj = {};
+        }
+        const mdText = serializeTipTapToMarkdown(docObj);
+        await notesApi.saveMarkdownFile(draft.filePath, mdText);
+
+        const cached = externalNotesMapRef.current.get(draft.noteId);
+        if (cached) {
+          const updatedCached: Note = {
+            ...cached,
+            contentJson: draft.contentJson,
+            plainText: draft.plainText,
+            updatedAt: Date.now(),
+          };
+          externalNotesMapRef.current.set(draft.noteId, updatedCached);
+        }
+
         setNotes((prev) =>
-          sortSummaries(prev.map((item) => (item.id === summary.id ? summary : item)))
+          sortSummaries(
+            prev.map((item) =>
+              item.id === draft.noteId ? { ...item, updatedAt: Date.now() } : item
+            )
+          )
         );
+      } else {
+        // Save to internal store
+        const summary = await notesApi.saveNote(
+          draft.noteId,
+          draft.contentJson,
+          draft.plainText
+        );
+        if (searchQueryRef.current.trim()) {
+          const refreshed = await notesApi.listNotes(searchQueryRef.current);
+          setNotes(refreshed);
+        } else {
+          setNotes((prev) =>
+            sortSummaries(prev.map((item) => (item.id === summary.id ? summary : item)))
+          );
+        }
       }
+
       setSaveStatus('saved');
     } catch {
       pendingDraftRef.current = draft;
@@ -119,7 +164,28 @@ export function App() {
     let cancelled = false;
     void (async () => {
       const filtered = await notesApi.listNotes(searchQuery);
-      if (!cancelled) setNotes(filtered);
+      if (!cancelled) {
+        // Keep active external notes visible during search if they match
+        const externals: NoteSummary[] = [];
+        externalNotesMapRef.current.forEach((extNote) => {
+          const q = searchQuery.trim().toLowerCase();
+          if (
+            !q ||
+            extNote.title.toLowerCase().includes(q) ||
+            extNote.plainText.toLowerCase().includes(q)
+          ) {
+            externals.push({
+              id: extNote.id,
+              title: extNote.title,
+              preview: extNote.preview,
+              pinned: extNote.pinned,
+              updatedAt: extNote.updatedAt,
+              isExternal: true,
+            });
+          }
+        });
+        setNotes(sortSummaries([...externals, ...filtered]));
+      }
     })();
     return () => {
       cancelled = true;
@@ -188,6 +254,12 @@ export function App() {
     async (id: string) => {
       if (activeNote?.id === id) return;
       await flushPendingSave();
+
+      if (externalNotesMapRef.current.has(id)) {
+        setActiveNote(externalNotesMapRef.current.get(id)!);
+        return;
+      }
+
       const full = await notesApi.getNote(id);
       setActiveNote(full);
     },
@@ -205,9 +277,198 @@ export function App() {
     setActiveNote(created);
   }, [flushPendingSave]);
 
+  // Open an external Markdown file
+  const handleOpenMarkdownFile = useCallback(async () => {
+    await flushPendingSave();
+    const fileData = await notesApi.openMarkdownFileDialog();
+    if (!fileData) return;
+
+    const parsed = parseMarkdownToTipTap(fileData.content, fileData.filename);
+    const externalNote: Note = {
+      id: `ext-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      title: parsed.title,
+      preview: parsed.preview,
+      contentJson: parsed.contentJson,
+      plainText: parsed.plainText,
+      pinned: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      filePath: fileData.path,
+    };
+
+    externalNotesMapRef.current.set(externalNote.id, externalNote);
+
+    setNotes((prev) => [
+      {
+        id: externalNote.id,
+        title: externalNote.title,
+        preview: externalNote.preview,
+        pinned: false,
+        updatedAt: externalNote.updatedAt,
+        isExternal: true,
+      },
+      ...prev,
+    ]);
+    setActiveNote(externalNote);
+  }, [flushPendingSave]);
+
+  // Save As (export to Markdown)
+  const handleSaveAs = useCallback(async () => {
+    if (!activeNoteRef.current) return;
+    await flushPendingSave();
+
+    const current = activeNoteRef.current;
+    let docObj: Record<string, unknown> = {};
+    try {
+      docObj = JSON.parse(current.contentJson) as Record<string, unknown>;
+    } catch {
+      docObj = {};
+    }
+
+    const mdText = serializeTipTapToMarkdown(docObj);
+    const defaultName = current.title ? `${current.title}.md` : 'Catatan.md';
+    const savedPath = await notesApi.saveAsMarkdownDialog(defaultName, mdText);
+
+    if (savedPath) {
+      const updated: Note = {
+        ...current,
+        filePath: savedPath,
+        updatedAt: Date.now(),
+      };
+      externalNotesMapRef.current.set(updated.id, updated);
+      setActiveNote(updated);
+      setNotes((prev) =>
+        prev.map((item) =>
+          item.id === updated.id ? { ...item, isExternal: true, updatedAt: updated.updatedAt } : item
+        )
+      );
+      setSaveStatus('saved');
+    }
+  }, [flushPendingSave]);
+
+  // Drag & drop support for Markdown files
+  useEffect(() => {
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    const handleDrop = async (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const files = e.dataTransfer?.files;
+      if (!files || files.length === 0) return;
+
+      const file = files[0];
+      const isMd =
+        file.name.endsWith('.md') ||
+        file.name.endsWith('.markdown') ||
+        file.name.endsWith('.txt');
+
+      if (isMd) {
+        await flushPendingSave();
+        const content = await file.text();
+        const filePath = (file as unknown as { path?: string }).path;
+        const parsed = parseMarkdownToTipTap(content, file.name);
+
+        const externalNote: Note = {
+          id: `ext-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+          title: parsed.title,
+          preview: parsed.preview,
+          contentJson: parsed.contentJson,
+          plainText: parsed.plainText,
+          pinned: false,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          filePath: filePath || undefined,
+        };
+
+        externalNotesMapRef.current.set(externalNote.id, externalNote);
+
+        setNotes((prev) => [
+          {
+            id: externalNote.id,
+            title: externalNote.title,
+            preview: externalNote.preview,
+            pinned: false,
+            updatedAt: externalNote.updatedAt,
+            isExternal: true,
+          },
+          ...prev,
+        ]);
+        setActiveNote(externalNote);
+      }
+    };
+
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('drop', handleDrop);
+
+    // Tauri-specific drag drop listener
+    let unlistenTauriDrop: (() => void) | undefined;
+    if (isTauriRuntime()) {
+      void (async () => {
+        unlistenTauriDrop = await getCurrentWindow().onDragDropEvent(async (event) => {
+          if (event.payload.type === 'drop' && event.payload.paths.length > 0) {
+            const dropPath = event.payload.paths[0];
+            const isMdPath =
+              dropPath.endsWith('.md') ||
+              dropPath.endsWith('.markdown') ||
+              dropPath.endsWith('.txt');
+            if (isMdPath) {
+              await flushPendingSave();
+              try {
+                const fileData = await notesApi.readMarkdownFile(dropPath);
+                const parsed = parseMarkdownToTipTap(fileData.content, fileData.filename);
+                const externalNote: Note = {
+                  id: `ext-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+                  title: parsed.title,
+                  preview: parsed.preview,
+                  contentJson: parsed.contentJson,
+                  plainText: parsed.plainText,
+                  pinned: false,
+                  createdAt: Date.now(),
+                  updatedAt: Date.now(),
+                  filePath: fileData.path,
+                };
+
+                externalNotesMapRef.current.set(externalNote.id, externalNote);
+                setNotes((prev) => [
+                  {
+                    id: externalNote.id,
+                    title: externalNote.title,
+                    preview: externalNote.preview,
+                    pinned: false,
+                    updatedAt: externalNote.updatedAt,
+                    isExternal: true,
+                  },
+                  ...prev,
+                ]);
+                setActiveNote(externalNote);
+              } catch (err) {
+                console.error('Gagal membaca dropped markdown file:', err);
+              }
+            }
+          }
+        });
+      })();
+    }
+
+    return () => {
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('drop', handleDrop);
+      if (unlistenTauriDrop) unlistenTauriDrop();
+    };
+  }, [flushPendingSave]);
+
   const handleContentChange = useCallback(
     (noteId: string, contentJson: string, plainText: string) => {
-      pendingDraftRef.current = { noteId, contentJson, plainText };
+      pendingDraftRef.current = {
+        noteId,
+        contentJson,
+        plainText,
+        filePath: activeNoteRef.current?.filePath,
+      };
       setSaveStatus('saving');
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
@@ -222,6 +483,17 @@ export function App() {
   const handleTogglePinNote = useCallback(
     async (id: string) => {
       await flushPendingSave();
+      if (externalNotesMapRef.current.has(id)) {
+        const ext = externalNotesMapRef.current.get(id)!;
+        const updated = { ...ext, pinned: !ext.pinned };
+        externalNotesMapRef.current.set(id, updated);
+        setNotes((prev) =>
+          sortSummaries(prev.map((item) => (item.id === id ? { ...item, pinned: updated.pinned } : item)))
+        );
+        setActiveNote((prev) => (prev && prev.id === id ? updated : prev));
+        return;
+      }
+
       const updated = await notesApi.togglePinNote(id);
       setNotes((prev) =>
         sortSummaries(prev.map((item) => (item.id === updated.id ? updated : item)))
@@ -245,6 +517,23 @@ export function App() {
         await flushPendingSave();
       }
 
+      if (externalNotesMapRef.current.has(id)) {
+        externalNotesMapRef.current.delete(id);
+        const remaining = notes.filter((n) => n.id !== id);
+        setNotes(remaining);
+        if (activeNote?.id === id) {
+          if (remaining.length > 0) {
+            const nextNote = externalNotesMapRef.current.has(remaining[0].id)
+              ? externalNotesMapRef.current.get(remaining[0].id)!
+              : await notesApi.getNote(remaining[0].id);
+            setActiveNote(nextNote);
+          } else {
+            setActiveNote(null);
+          }
+        }
+        return;
+      }
+
       await notesApi.deleteNote(id);
       const remaining = await notesApi.listNotes(searchQueryRef.current);
       setNotes(remaining);
@@ -258,7 +547,7 @@ export function App() {
         }
       }
     },
-    [activeNote?.id, flushPendingSave]
+    [activeNote?.id, flushPendingSave, notes]
   );
 
   const handleToggleAlwaysOnTop = useCallback(async () => {
@@ -285,15 +574,25 @@ export function App() {
     editorRef.current?.runFormatAction(action);
   }, []);
 
-  // Global keyboard shortcuts: Ctrl+N, Ctrl+\, Ctrl+F
+  // Global keyboard shortcuts: Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S, Ctrl+\, Ctrl+F
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
 
-      if (e.key.toLowerCase() === 'n') {
+      if (e.key.toLowerCase() === 'n' && !e.shiftKey) {
         e.preventDefault();
         void handleCreateNote();
+      } else if (e.key.toLowerCase() === 'o') {
+        e.preventDefault();
+        void handleOpenMarkdownFile();
+      } else if (e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          void handleSaveAs();
+        } else {
+          void flushPendingSave();
+        }
       } else if (e.key === '\\') {
         e.preventDefault();
         handleToggleSidebar();
@@ -305,7 +604,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [handleCreateNote, handleToggleSidebar]);
+  }, [flushPendingSave, handleCreateNote, handleOpenMarkdownFile, handleSaveAs, handleToggleSidebar]);
 
   return (
     <div className="app-shell">
@@ -313,6 +612,8 @@ export function App() {
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={handleToggleSidebar}
         onCreateNote={() => void handleCreateNote()}
+        onOpenFile={() => void handleOpenMarkdownFile()}
+        onSaveAs={() => void handleSaveAs()}
         hasActiveNote={activeNote !== null}
         formatState={formatState}
         onFormatAction={handleFormatAction}
